@@ -23,6 +23,6 @@ causalmed-core = { path = "../crates/causalmed-core" }
 causalmed-renderer = { path = "../crates/causalmed-renderer" }
 pollster = "0.4"
 tauri-plugin-dialog = "2"
-
-[dev-dependencies]
 tempfile = "3"
+sha2 = "0.10"
+rusqlite = { version = "0.32", features = ["bundled"] }

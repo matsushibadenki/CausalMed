@@ -41,7 +41,7 @@ def _histogram(values, cutoff_min=None, cutoff_max=None, log=False):
             'lower': cutoff_min, 'upper': cutoff_max}
 
 
-def quality_control(data, options, progress=lambda percent, phase: None):
+def quality_control(data, options, progress=lambda percent, phase: None, selection_callback=None):
     import numpy as np
     import pandas as pd
     from scipy import sparse
@@ -141,6 +141,22 @@ def quality_control(data, options, progress=lambda percent, phase: None):
                       'groups': [{'label': str(key)[:200], 'cells': int(value),
                                   'retained': int(retained.get(key, 0)) if valid else None}
                                  for key, value in counts.iloc[:30].items()]})
+    if valid and selection_callback is not None:
+        bits = np.zeros(n, dtype=np.uint8)
+        for index, mask in enumerate(masks.values()):
+            bits |= mask.astype(np.uint8) << index
+        donor_ids = np.full(n, '', dtype=str)
+        donor_missing = np.ones(n, dtype=bool)
+        if o['donorColumn']:
+            donor_ids = data.obs[o['donorColumn']].astype('string').fillna('').to_numpy(dtype=str)
+            donor_missing = np.array([not value.strip() for value in donor_ids], dtype=bool)
+        mito_percent = np.full(n, np.nan)
+        if available_mito:
+            np.divide(mito_totals * 100, totals, out=mito_percent, where=totals > 0)
+        selection_callback({'source_row': np.arange(n), 'cell_id': np.asarray(data.obs_names, dtype=str),
+                            'retained': passed, 'reason_bits': bits, 'total_counts': totals,
+                            'detected_genes': detected, 'mito_percent': mito_percent,
+                            'donor_id': donor_ids, 'donor_missing': donor_missing})
     return {'version': 1, 'status': ('ready' if available_mito else 'partial') if valid else 'invalid_counts',
             'options': o, 'features': g, 'mitoFeatures': int(mito.sum()), 'invalidValues': invalid,
             'cells': n, 'retained': int(passed.sum()) if valid else None,

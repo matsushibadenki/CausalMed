@@ -30,12 +30,17 @@ fn bounded(value: &str, max: usize) -> bool {
 }
 
 pub fn validate_bundle(bundle: &EvidenceBundle, document: &Document) -> Result<()> {
+    if bundle.edges.len() > 5000 {
+        return Err(invalid("invalid_bundle_size"));
+    }
+    validate_full_bundle(bundle, document)
+}
+fn validate_full_bundle(bundle: &EvidenceBundle, document: &Document) -> Result<()> {
     if bundle.schema_version != 1 {
         return Err(invalid("unsupported_schema"));
     }
     if bundle.sources.is_empty()
         || bundle.edges.is_empty()
-        || bundle.edges.len() > 5000
         || document.edges.len() + bundle.edges.len() > 10000
     {
         return Err(invalid("invalid_bundle_size"));
@@ -106,6 +111,28 @@ impl ResearchStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         Self::from_connection(Connection::open(path)?)
     }
+    pub fn inspect(path: impl AsRef<Path>) -> Result<Document> {
+        let connection =
+            Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let json: String = connection.query_row(
+            "SELECT payload FROM research_document WHERE id=1",
+            [],
+            |r| r.get(0),
+        )?;
+        let document: Document = serde_json::from_str(&json)?;
+        if document.schema_version != 1 {
+            return Err(invalid("unsupported_schema"));
+        }
+        Ok(document)
+    }
+    pub fn rename_project(&mut self, name: &str) -> Result<Document> {
+        if !bounded(name, 120) {
+            return Err(invalid("invalid_project_name"));
+        }
+        let mut document = self.snapshot();
+        document.project_name = name.trim().into();
+        self.commit(document)
+    }
     pub fn in_memory() -> Result<Self> {
         Self::from_connection(Connection::open_in_memory()?)
     }
@@ -135,6 +162,70 @@ impl ResearchStore {
     }
     pub fn snapshot(&self) -> Document {
         self.document.clone()
+    }
+    /// Restore a complete, validated research document into a staged project store.
+    pub fn restore_document(
+        &mut self,
+        mut document: Document,
+        minimum_revision: u64,
+    ) -> Result<Document> {
+        if document.schema_version != 1
+            || !bounded(&document.project_name, 500)
+            || document.edges.len() > 10000
+            || document.hypotheses.len() > 10000
+            || document.imports.len() > 10000
+            || document.activity.len() > 100
+        {
+            return Err(invalid("invalid_project"));
+        }
+        let mut empty = Document::default();
+        empty.sources.clear();
+        empty.edges.clear();
+        if !document.edges.is_empty() || !document.sources.is_empty() {
+            // The import batch limit is 5,000; a restored accumulated document may contain 10,000.
+            let bundle = EvidenceBundle {
+                schema_version: 1,
+                sources: document.sources.clone(),
+                edges: document.edges.clone(),
+            };
+            validate_full_bundle(&bundle, &empty)?;
+        }
+        let edges: HashSet<_> = document.edges.iter().map(|e| e.id.as_str()).collect();
+        let sources: HashSet<_> = document.sources.iter().map(|s| s.id.as_str()).collect();
+        let mut ids = HashSet::new();
+        for h in &document.hypotheses {
+            if !ids.insert(&h.id)
+                || !bounded(&h.id, 128)
+                || !edges.contains(h.edge_id.as_str())
+                || !bounded(&h.title, 500)
+                || !bounded(&h.intervention, 4000)
+                || !bounded(&h.falsification, 4000)
+                || h.safety != "unknown"
+            {
+                return Err(invalid("invalid_project"));
+            }
+        }
+        if document
+            .workspace
+            .selected_edge_id
+            .as_deref()
+            .is_some_and(|id| !edges.contains(id))
+            || document
+                .imports
+                .iter()
+                .any(|r| r.source_ids.iter().any(|id| !sources.contains(id.as_str())))
+        {
+            return Err(invalid("invalid_project"));
+        }
+        // Revision ordering remains monotonic across a project switch and all WebViews.
+        document.revision = document.revision.max(minimum_revision);
+        if document.revision == u64::MAX {
+            return Err(invalid("invalid_project"));
+        }
+        if document.workspace.inspector_dock == Dock::Floating {
+            document.workspace.inspector_dock = Dock::Right;
+        }
+        self.commit(document)
     }
     fn commit(&mut self, mut next: Document) -> Result<Document> {
         next.revision += 1;

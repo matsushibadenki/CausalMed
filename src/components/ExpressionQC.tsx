@@ -1,3 +1,4 @@
+import { QcExports } from './QcExports';
 import { useState } from 'react';
 import { Play, SlidersHorizontal, Users, TriangleAlert } from 'lucide-react';
 import type { Locale } from '../lib/types';
@@ -47,6 +48,7 @@ export function ExpressionQC({report,locale,active,canAnalyze,timeout}:{report:H
     {!canAnalyze ? <p className="source-note">{t.sourceUnavailable}</p> : null}
     {error ? <p role="alert" className="form-error">{t[error as keyof typeof t] ?? t.invalid_qc_options}</p> : null}
     {qc ? <>
+      {valid ? <QcExports key={report.selection?.id ?? 'none'} report={report} locale={locale} active={active} dirty={JSON.stringify(options)!==JSON.stringify(qc.options)} timeout={timeout}/> : null}
       {qc.status==='invalid_counts' ? <div className="qc-warning"><TriangleAlert size={16}/><div><strong>{t.invalid}</strong><p>{t.invalidHelp}</p><span>{t.nonfinite}: {qc.invalidValues.nonfinite} · {t.negative}: {qc.invalidValues.negative} · {t.fractional}: {qc.invalidValues.fractional}</span></div></div> : <>
         <div className="qc-summary"><div><strong>{qc.retained?.toLocaleString()}</strong><span>{t.retained}</span></div><div><strong>{qc.excluded?.toLocaleString()}</strong><span>{t.excluded}</span></div><div className="qc-retention-track" role="img" aria-label={`${t.retained}: ${qc.retained} / ${qc.cells}`}><span style={{width:`${(qc.retained??0)/qc.cells*100}%`}}/></div><b>{((qc.retained??0)/qc.cells*100).toFixed(2)}%</b></div>
         {qc.status==='partial' ? <p className="qc-partial"><TriangleAlert size={13}/>{t.partial}</p> : null}

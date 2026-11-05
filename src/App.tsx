@@ -1,3 +1,5 @@
+import { useH5ad } from './lib/h5ad';
+import { ProjectControls } from './components/ProjectControls';
 import { useRef, useState, useEffect, useMemo } from 'react';
 import { Layers, Database, FlaskConical, ChartNoAxesColumnIncreasing, Upload, Download, Network, Circle, PanelRight, ExternalLink } from 'lucide-react';
 import { EvidenceExplorer } from './components/EvidenceExplorer';
@@ -15,9 +17,11 @@ const floating=new URLSearchParams(window.location.search).get('panel')==='inspe
 
 export default function App() {
   const {document,error:loadError}=useResearch();
+  const job=useH5ad();
   const [view,setView]=useState<View>('evidence');
   const [error,setError]=useState<unknown>(null);const [busy,setBusy]=useState(false);
   const [draftEdge,setDraftEdge]=useState<Edge|null>(null);const [dragging,setDragging]=useState(false);
+  useEffect(()=>{setDraftEdge(null);setError(null);setDragging(false);},[job.projectKey]);
   const upload=useRef<HTMLInputElement>(null);
   const locale=document?.workspace.locale??'ja';
   const t=useMemo(()=>translator(locale),[locale]);
@@ -34,15 +38,15 @@ export default function App() {
   return <div className="app-shell" aria-busy={busy}>
     <aside className="sidebar">
       <div className="brand"><Network size={24} strokeWidth={2}/><span>CausalMed</span></div>
-      <div className="project-label"><span className="project-initial">IP</span><span>{t('research')}</span></div>
+      <div className="project-label"><span className="project-initial">{document.projectName.slice(0,2).toUpperCase()}</span><span title={document.projectName}>{document.projectName}</span></div>
       <nav aria-label="CausalMed">{navigation.map(({id,icon:Icon})=><button key={id} className={view===id?'active':''} aria-current={view===id?'page':undefined} title={t(id)} onClick={()=>setView(id)}><Icon size={19} strokeWidth={1.7}/><span>{t(id)}</span>{id==='hypotheses'&&document.hypotheses.length?<small>{document.hypotheses.length}</small>:null}</button>)}</nav>
       <div className="workspace-status"><span className="status-dot"/><span>{t(native?'local':'preview')}</span>{!native?<Info text={t('previewHelp')}/>:null}</div>
     </aside>
-    <header className="topbar"><div className="breadcrumb"><span>{t('research')}</span><span>/</span><strong>{t(view)}</strong></div><div className="topbar-actions">{view!=='datasets'?<span className="demo-label"><Circle size={7} fill="currentColor"/>{t(document.sources.every(s=>s.synthetic)?'synthetic':'mixed')}</span>:null}<select aria-label="Language / 言語 / 语言" value={locale} onChange={event=>void act(()=>setLocale(event.target.value as Locale))}>{Object.entries(localeLabels).map(([code,label])=><option key={code} value={code}>{label}</option>)}</select><div className="toolbar-divider"/><IconButton label={native?t('export'):t('previewHelp')} disabled={!native||busy} onClick={()=>void act(()=>invoke('export_workspace'))}><Download size={18}/></IconButton><button className="button import-button" disabled={!native||busy} title={native?t('importHelp'):t('previewHelp')} onClick={()=>upload.current?.click()}><Upload size={17}/><span>{t('import')}</span></button></div></header>
+    <header className="topbar"><div className="breadcrumb"><span>{document.projectName}</span><span>/</span><strong>{t(view)}</strong></div><div className="topbar-actions">{view!=='datasets'&&document.sources.length>0?<span className="demo-label"><Circle size={7} fill="currentColor"/>{t(document.sources.every(s=>s.synthetic)?'synthetic':'mixed')}</span>:null}<select aria-label="Language / 言語 / 语言" value={locale} onChange={event=>void act(()=>setLocale(event.target.value as Locale))}>{Object.entries(localeLabels).map(([code,label])=><option key={code} value={code}>{label}</option>)}</select><ProjectControls locale={locale} onRestore={()=>setView('datasets')}/><div className="toolbar-divider"/><IconButton label={native?t('export'):t('previewHelp')} disabled={!native||busy} onClick={()=>void act(()=>invoke('export_workspace'))}><Download size={18}/></IconButton><button className="button import-button" disabled={!native||busy} title={native?t('importHelp'):t('previewHelp')} onClick={()=>upload.current?.click()}><Upload size={17}/><span>{t('import')}</span></button></div></header>
     <div className={`workspace dock-${dock} ${view==='evidence'?'with-inspector':''}`}>
       <main className="main-content">{banner}
         {view==='evidence'?<EvidenceExplorer document={document} t={t} onSelect={onSelect} native={native} onGraph={()=>void act(openGraph)}/>:null}
-        {view==='datasets'?<Datasets document={document} t={t}/>:null}
+        {view==='datasets'?<Datasets key={job.projectKey} document={document} t={t}/>:null}
         {view==='hypotheses'?<Hypotheses document={document} t={t} busy={busy} onExplore={()=>setView('evidence')} onStatus={(id,status)=>void act(()=>setHypothesisStatus(id,status))}/>:null}
         {view==='benchmark'?<BenchmarkView document={document} t={t} native={native} busy={busy} onRun={()=>void act(runBenchmark)}/>:null}
         {view==='evidence'&&dock==='floating'?<div className="detached-notice"><ExternalLink size={17}/>{t('panelDetached')}<button className="button" onClick={()=>onDock('right')}><PanelRight size={16}/>{t('restorePanel')}</button></div>:null}

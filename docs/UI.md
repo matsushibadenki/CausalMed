@@ -15,3 +15,24 @@ H5AD datasets now use a compact visual summary: cell/gene/file-size/duplicate me
 
 
 Expression QC adds a saved-analysis heading, explicit donor-column mapping, collapsible settings and three aggregate histograms. Count/gene axes are labeled log10(1 + value); mitochondrial percentages use a linear axis. Saved thresholds are dashed markers with excluded regions shaded. A retention strip complements the exact retained/excluded counts. Donor rows compare total and retained cells; a missing mitochondrial measurement is shown as unavailable rather than a 0% chart. Draft settings only affect results after a successful QC run.
+
+
+Saved QC decisions now have an analysis ID/timestamp and two export actions: complete QC results (ZIP), or retained rows (H5AD). Draft edits disable both actions until QC is rerun. Export-specific status/progress labels and an expandable checksum receipt distinguish writing from analysis. Per-cell vectors remain outside WebViews. Native save dialogs select a new output; existing destinations are not replaced.
+
+QC history lists timestamped runs with retention bars and a selected-run marker. Baseline/candidate controls show changed settings in a comparison table and four cell-decision transition counts with a stacked bar. Selecting a past run restores its charts, donor mapping and export actions. English, Japanese and Simplified Chinese labels are provided.
+
+The top bar has icon-led project save/restore controls with an information tooltip and localized operation feedback. The H5AD panel shows source-linked/missing status, the linked filename and a native source-relink picker. H5AD export is disabled until the source is linked; QC ZIP export remains available. Verification uses the existing progress/cancel/timeout strip.
+
+The project-list icon opens a compact native WebView dialog showing active project, QC history count, selected result, retention totals, donor mapping and source connection. New project creation and active-project naming use two inline forms. Switching returns to the saved dataset state and resets temporary QC edits. All controls are localized in English, Japanese and Simplified Chinese.
+
+## Searchable lists
+
+Project and QC lists have compact search, filter, sort, page-size and reset controls, localized in English, Japanese and Simplified Chinese. Result ranges and filtered totals make empty searches explicit. Search/filter changes return to page one. QC comparison chips preserve baseline/candidate choices across pages and support independent removal; project switches clear them. Flexible control wrapping and horizontally aligned search icons keep the dialog readable. See [browse validation](BROWSE_VALIDATION.md).
+
+## Reversible organization
+
+Both list toolbars have a Trash toggle and icon-led move/restore actions. Trash uses the same bounded search, filters, ordering and pages. Active projects show a disabled move action with a switch-first explanation. Selected-history moves clear comparison targets and saved-result actions; restore requires explicit reselection. Empty trash has its own localized message. Information controls explain reversible storage and inclusion of both QC history buckets in schema-2 packages. The native macOS round trip and final desktop render are recorded in [trash validation](TRASH_VALIDATION.md).
+
+## Multiple selection
+
+Rows and the current eligible page can be selected for organization. The toolbar shows total and off-page selected counts, clear-selection and a bulk move/restore action. Search/filter/sort/page changes preserve selected IDs; project/bucket changes reset them. Active projects are disabled. Receipts show completed/failed counts and expandable per-item errors; only successful IDs are removed. Native screenshots appear in the English README and [bulk validation](BULK_VALIDATION.md).

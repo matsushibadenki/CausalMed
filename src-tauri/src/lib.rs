@@ -1,14 +1,188 @@
+mod browse;
 mod h5ad;
+mod project;
+mod search_index;
+mod trash;
 use causalmed_core::{Dock, Document, HypothesisStatus, Locale, NewHypothesis, ResearchStore};
 use causalmed_renderer::Renderer;
-use std::sync::{Arc, Mutex};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, RwLock};
 use tauri::{Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
 struct AppState {
     store: Mutex<ResearchStore>,
-    h5ad: h5ad::Worker,
+    h5ad: RwLock<Arc<h5ad::Worker>>,
+    project_gate: RwLock<()>,
+    root: PathBuf,
     renderer: Mutex<Option<Renderer>>,
+}
+impl AppState {
+    fn worker(&self) -> Arc<h5ad::Worker> {
+        self.h5ad.read().unwrap().clone()
+    }
+    fn switch_to(&self, id: &str) -> Result<u64, String> {
+        let _gate = self.project_gate.try_write().map_err(|_| "project_busy")?;
+        if ["selecting", "running", "cancelling"]
+            .contains(&self.worker().snapshot().status.as_str())
+        {
+            return Err("worker_busy".into());
+        }
+        let folder = project::resolve(&self.root, id)?;
+        let mut current = self.store.lock().map_err(|_| "state_unavailable")?;
+        let (next, next_worker) =
+            project::prepare_switch(&self.root, id, current.snapshot().revision)?;
+        let revision = next.snapshot().revision;
+        let mut worker = self.h5ad.write().map_err(|_| "state_unavailable")?;
+        project::activate(&self.root, &folder)?;
+        *current = next;
+        *worker = Arc::new(next_worker);
+        Ok(revision)
+    }
+}
+fn publish_project(app: &tauri::AppHandle, revision: u64) {
+    let _ = app.emit("document-changed", revision);
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        for name in ["inspector", "graph"] {
+            if let Some(window) = handle.get_webview_window(name) {
+                let _ = window.close();
+            }
+        }
+        *handle.state::<AppState>().renderer.lock().unwrap() = None;
+    });
+}
+#[tauri::command]
+async fn query_projects(
+    app: tauri::AppHandle,
+    query: browse::Query,
+) -> Result<browse::Page<project::ProjectSummary>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let _gate = state.project_gate.try_read().map_err(|_| "project_busy")?;
+        browse::projects(&state.root, &state.worker().snapshot().project_key, &query)
+    })
+    .await
+    .map_err(|_| "storage_error")?
+}
+#[tauri::command]
+async fn query_qc_history(
+    app: tauri::AppHandle,
+    project_key: String,
+    query: browse::Query,
+) -> Result<browse::Page<browse::HistoryRow>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let _gate = state.project_gate.try_read().map_err(|_| "project_busy")?;
+        browse::history(&state.worker(), &project_key, &query)
+    })
+    .await
+    .map_err(|_| "storage_error")?
+}
+#[tauri::command]
+async fn set_trash(
+    app: tauri::AppHandle,
+    project_key: String,
+    id: String,
+    kind: String,
+    restore: bool,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let _gate = state.project_gate.try_write().map_err(|_| "project_busy")?;
+        let worker = state.worker();
+        let snapshot = worker.snapshot();
+        if snapshot.project_key != project_key {
+            return Err("project_changed".into());
+        }
+        if ["selecting", "running", "cancelling"].contains(&snapshot.status.as_str()) {
+            return Err("worker_busy".into());
+        }
+        match kind.as_str() {
+            "history" => trash::history(&worker, &project_key, &id, restore),
+            "project" => trash::project(&state.root, &id, restore),
+            _ => Err("trash_unavailable".into()),
+        }
+    })
+    .await
+    .map_err(|_| "storage_error")?
+}
+#[tauri::command]
+async fn set_trash_batch(
+    app: tauri::AppHandle,
+    project_key: String,
+    kind: String,
+    ids: Vec<String>,
+    restore: bool,
+) -> Result<trash::BatchResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let _gate = state.project_gate.try_write().map_err(|_| "project_busy")?;
+        trash::batch(
+            &state.root,
+            &state.worker(),
+            &project_key,
+            &kind,
+            &ids,
+            restore,
+        )
+    })
+    .await
+    .map_err(|_| "storage_error")?
+}
+#[tauri::command]
+async fn list_projects(app: tauri::AppHandle) -> Result<Vec<project::ProjectSummary>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let _gate = state.project_gate.try_read().map_err(|_| "project_busy")?;
+        project::catalog(&state.root)
+    })
+    .await
+    .map_err(|_| "storage_error")?
+}
+#[tauri::command]
+async fn switch_project(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let revision = app.state::<AppState>().switch_to(&id)?;
+        publish_project(&app, revision);
+        Ok(())
+    })
+    .await
+    .map_err(|_| "storage_error")?
+}
+#[tauri::command]
+async fn create_project(app: tauri::AppHandle, name: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let gate = state.project_gate.try_write().map_err(|_| "project_busy")?;
+        if ["selecting", "running", "cancelling"]
+            .contains(&state.worker().snapshot().status.as_str())
+        {
+            return Err("worker_busy".into());
+        }
+        let mut current = state.store.lock().map_err(|_| "state_unavailable")?;
+        let folder = project::create(&state.root, &name, current.snapshot().revision)?;
+        let next = ResearchStore::open(folder.path().join("research.sqlite3"))
+            .map_err(|_| "storage_error")?;
+        let revision = next.snapshot().revision;
+        let next_worker = Arc::new(h5ad::Worker::new(folder.path()));
+        let mut worker = state.h5ad.write().map_err(|_| "state_unavailable")?;
+        project::activate(&state.root, folder.path())?;
+        let _kept = folder.keep();
+        *current = next;
+        *worker = next_worker;
+        drop(worker);
+        drop(current);
+        drop(gate);
+        publish_project(&app, revision);
+        Ok(())
+    })
+    .await
+    .map_err(|_| "storage_error")?
+}
+#[tauri::command]
+fn rename_project(app: tauri::AppHandle, state: State<AppState>, name: String) -> Reply {
+    mutate(&app, &state, |s| s.rename_project(&name))
 }
 type Reply = Result<Document, String>;
 
@@ -17,6 +191,7 @@ fn mutate(
     state: &AppState,
     operation: impl FnOnce(&mut ResearchStore) -> causalmed_core::Result<Document>,
 ) -> Reply {
+    let _gate = state.project_gate.try_read().map_err(|_| "project_busy")?;
     let document = operation(&mut *state.store.lock().map_err(|_| "state_unavailable")?)
         .map_err(|e| e.to_string())?;
     // Only a revision notification crosses the event bus; consumers request a snapshot.
@@ -25,6 +200,7 @@ fn mutate(
 }
 #[tauri::command]
 fn get_document(state: State<AppState>) -> Reply {
+    let _gate = state.project_gate.try_read().map_err(|_| "project_busy")?;
     Ok(state
         .store
         .lock()
@@ -91,6 +267,114 @@ fn set_hypothesis_status(
 #[tauri::command]
 fn run_benchmark(app: tauri::AppHandle, state: State<AppState>) -> Reply {
     mutate(&app, &state, |s| s.run_synthetic_benchmark())
+}
+
+#[tauri::command]
+async fn save_project(app: tauri::AppHandle) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let _gate = state.project_gate.try_write().map_err(|_| "project_busy")?;
+        let worker = state.worker();
+        if ["selecting", "running", "cancelling"].contains(&worker.snapshot().status.as_str()) {
+            return Err("worker_busy".into());
+        }
+        let Some(file) = app
+            .dialog()
+            .file()
+            .add_filter("CausalMed", &["causalmed"])
+            .set_file_name("causalmed-project.causalmed")
+            .blocking_save_file()
+        else {
+            return Ok(false);
+        };
+        let path = file.into_path().map_err(|_| "invalid_project")?;
+        let doc = state
+            .store
+            .lock()
+            .map_err(|_| "state_unavailable")?
+            .snapshot();
+        let stage = project::stage_save(&state.root, &doc, &worker)?;
+        project::save(stage.path(), &path)?;
+        Ok(true)
+    })
+    .await
+    .map_err(|_| "storage_error")?
+}
+#[tauri::command]
+async fn restore_project(app: tauri::AppHandle) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let _gate = state.project_gate.try_write().map_err(|_| "project_busy")?;
+        if ["selecting", "running", "cancelling"]
+            .contains(&state.worker().snapshot().status.as_str())
+        {
+            return Err("worker_busy".into());
+        }
+        let Some(file) = app
+            .dialog()
+            .file()
+            .add_filter("CausalMed", &["causalmed"])
+            .blocking_pick_file()
+        else {
+            return Ok(false);
+        };
+        let path = file.into_path().map_err(|_| "invalid_project")?;
+        let stage = project::unpack(&path, &state.root)?;
+        let doc = project::validate(stage.path())?;
+        let mut current = state.store.lock().map_err(|_| "state_unavailable")?;
+        let mut next = ResearchStore::open(stage.path().join("research.sqlite3"))
+            .map_err(|_| "storage_error")?;
+        let restored = next
+            .restore_document(doc, current.snapshot().revision)
+            .map_err(|_| "invalid_project")?;
+        std::fs::copy(
+            stage.path().join("selected.json"),
+            stage.path().join("h5ad-metadata.json"),
+        )
+        .map_err(|_| "storage_error")?;
+        let new_worker = Arc::new(h5ad::Worker::new(stage.path()));
+        let mut worker = state.h5ad.write().map_err(|_| "state_unavailable")?;
+        project::activate(&state.root, stage.path())?;
+        let _folder = stage.keep();
+        *current = next;
+        *worker = new_worker;
+        drop(worker);
+        drop(current);
+        drop(_gate);
+        publish_project(&app, restored.revision);
+        Ok(true)
+    })
+    .await
+    .map_err(|_| "storage_error")?
+}
+#[tauri::command]
+async fn relink_h5ad(
+    app: tauri::AppHandle,
+    selection_id: String,
+    timeout_seconds: u64,
+) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let _gate = state.project_gate.try_read().map_err(|_| "project_busy")?;
+    let worker = state.worker();
+    let sha = worker.relink_sha(&selection_id)?;
+    worker.reserve(timeout_seconds)?;
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(file) = app
+            .dialog()
+            .file()
+            .add_filter("H5AD", &["h5ad"])
+            .blocking_pick_file()
+        else {
+            worker.finish("cancelled", None);
+            return;
+        };
+        match file.into_path() {
+            Ok(path) => worker.run_relink(&h5ad::python_path(), h5ad::worker_script(), &path, &sha),
+            Err(_) => worker.finish("failed", Some("invalid_h5ad")),
+        }
+    });
+    Ok(())
 }
 
 #[tauri::command]
@@ -244,7 +528,10 @@ async fn open_graph(app: tauri::AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 async fn import_h5ad(app: tauri::AppHandle, timeout_seconds: u64) -> Result<(), String> {
-    app.state::<AppState>().h5ad.reserve(timeout_seconds)?;
+    let state = app.state::<AppState>();
+    let _gate = state.project_gate.try_read().map_err(|_| "project_busy")?;
+    state.worker().reserve(timeout_seconds)?;
+    let app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let Some(file) = app
@@ -253,14 +540,14 @@ async fn import_h5ad(app: tauri::AppHandle, timeout_seconds: u64) -> Result<(), 
             .add_filter("H5AD", &["h5ad"])
             .blocking_pick_file()
         else {
-            state.h5ad.finish("cancelled", None);
+            state.worker().finish("cancelled", None);
             return;
         };
         match file.into_path() {
             Ok(path) => state
-                .h5ad
+                .worker()
                 .run(&h5ad::python_path(), h5ad::worker_script(), &path),
-            Err(_) => state.h5ad.finish("failed", Some("invalid_h5ad")),
+            Err(_) => state.worker().finish("failed", Some("invalid_h5ad")),
         }
     });
     Ok(())
@@ -276,10 +563,12 @@ async fn analyze_h5ad(
         return Err("invalid_qc_options".into());
     }
     let state = app.state::<AppState>();
-    let path = state.h5ad.analysis_source(&sha256)?;
-    state.h5ad.reserve(timeout_seconds)?;
+    let _gate = state.project_gate.try_read().map_err(|_| "project_busy")?;
+    let path = state.worker().analysis_source(&sha256)?;
+    state.worker().reserve(timeout_seconds)?;
+    let app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        app.state::<AppState>().h5ad.run_analysis(
+        app.state::<AppState>().worker().run_analysis(
             &h5ad::python_path(),
             h5ad::worker_script(),
             &path,
@@ -290,12 +579,101 @@ async fn analyze_h5ad(
     Ok(())
 }
 #[tauri::command]
+async fn export_h5ad_selection(
+    app: tauri::AppHandle,
+    selection_id: String,
+    kind: String,
+    timeout_seconds: u64,
+) -> Result<(), String> {
+    if !["export_h5ad", "export_qc"].contains(&kind.as_str()) {
+        return Err("invalid_export".into());
+    }
+    let state = app.state::<AppState>();
+    let _gate = state.project_gate.try_read().map_err(|_| "project_busy")?;
+    let source = state.worker().export_source(&selection_id)?;
+    state.worker().reserve(timeout_seconds)?;
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let (extension, name) = if kind == "export_h5ad" {
+            ("h5ad", "causalmed-retained.h5ad")
+        } else {
+            ("zip", "causalmed-qc-results.zip")
+        };
+        let Some(file) = app
+            .dialog()
+            .file()
+            .add_filter(extension, &[extension])
+            .set_file_name(name)
+            .blocking_save_file()
+        else {
+            state.worker().finish("cancelled", None);
+            return;
+        };
+        match file.into_path() {
+            Ok(path) => state.worker().run_export(
+                &h5ad::python_path(),
+                h5ad::worker_script(),
+                source,
+                &path,
+                &kind,
+            ),
+            Err(_) => state.worker().finish("failed", Some("invalid_export")),
+        }
+    });
+    Ok(())
+}
+#[tauri::command]
+fn get_qc_history(state: State<AppState>) -> Vec<serde_json::Value> {
+    state.worker().history()
+}
+#[tauri::command]
+fn select_qc_history(
+    state: State<AppState>,
+    id: String,
+    project_key: String,
+) -> Result<(), String> {
+    let _gate = state.project_gate.try_read().map_err(|_| "project_busy")?;
+    let worker = state.worker();
+    if worker.snapshot().project_key != project_key {
+        return Err("project_changed".into());
+    }
+    worker.select_history(&id)
+}
+#[tauri::command]
+async fn compare_qc_history(
+    app: tauri::AppHandle,
+    left: String,
+    right: String,
+    project_key: String,
+) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let _gate = state.project_gate.try_read().map_err(|_| "project_busy")?;
+    let worker = state.worker();
+    if worker.snapshot().project_key != project_key {
+        return Err("project_changed".into());
+    }
+    let a = worker.export_source(&left)?;
+    let b = state.worker().export_source(&right)?;
+    state.worker().reserve(120)?;
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<AppState>().worker().compare_history(
+            &h5ad::python_path(),
+            h5ad::worker_script(),
+            a,
+            b,
+        )
+    });
+    Ok(())
+}
+#[tauri::command]
 fn get_h5ad_state(state: State<AppState>) -> h5ad::Snapshot {
-    state.h5ad.snapshot()
+    state.worker().snapshot()
 }
 #[tauri::command]
 fn cancel_h5ad(state: State<AppState>) {
-    state.h5ad.cancel();
+    state.worker().cancel();
 }
 
 pub fn run() {
@@ -304,7 +682,8 @@ pub fn run() {
         .setup(|app| {
             let folder = app.path().app_data_dir()?;
             std::fs::create_dir_all(&folder)?;
-            let mut store = ResearchStore::open(folder.join("research.sqlite3"))?;
+            let active = project::active_folder(&folder)?;
+            let mut store = ResearchStore::open(active.join("research.sqlite3"))?;
             // A floating view never owns the document. Restore it docked on restart.
             if store.snapshot().workspace.inspector_dock == Dock::Floating {
                 store.set_dock(Dock::Right)?;
@@ -312,7 +691,9 @@ pub fn run() {
             app.manage(AppState {
                 store: Mutex::new(store),
                 renderer: Mutex::new(None),
-                h5ad: h5ad::Worker::new(&folder),
+                h5ad: RwLock::new(Arc::new(h5ad::Worker::new(&active))),
+                project_gate: RwLock::new(()),
+                root: folder,
             });
             Ok(())
         })
@@ -353,7 +734,11 @@ pub fn run() {
             get_document,
             import_h5ad,
             get_h5ad_state,
+            get_qc_history,
+            select_qc_history,
+            compare_qc_history,
             analyze_h5ad,
+            export_h5ad_selection,
             cancel_h5ad,
             import_evidence,
             select_edge,
@@ -363,7 +748,18 @@ pub fn run() {
             run_benchmark,
             set_inspector_dock,
             open_graph,
-            export_workspace
+            export_workspace,
+            set_trash,
+            set_trash_batch,
+            query_projects,
+            query_qc_history,
+            list_projects,
+            switch_project,
+            create_project,
+            rename_project,
+            save_project,
+            restore_project,
+            relink_h5ad
         ])
         .build(tauri::generate_context!())
         .expect("CausalMed failed to start")
@@ -372,7 +768,7 @@ pub fn run() {
                 event,
                 tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
             ) {
-                app.state::<AppState>().h5ad.shutdown();
+                app.state::<AppState>().worker().shutdown();
             }
         });
 }

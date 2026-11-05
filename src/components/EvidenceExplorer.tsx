@@ -23,7 +23,7 @@ export function EvidenceExplorer({document,t,onSelect,onGraph,native}:{document:
         <td><button className="molecule-button" aria-pressed={document.workspace.selectedEdgeId===edge.id} onClick={e=>{e.stopPropagation();onSelect(edge.id);}}>{edge.source}</button><span className="row-id">{edge.id}</span></td>
         <td><span className="relation-cell">{edge.relation==='associated'?<span className="association-mark">~</span>:<ArrowRight size={13}/>} {t(edge.relation)}</span></td><td className="molecule">{edge.target}</td><td><EvidenceLabel kind={edge.evidence} t={t}/></td><td><ChevronRight size={15}/></td>
       </tr>)}</tbody></table></div> : <Empty title={t('noResults')}><button className="button" onClick={()=>{setQuery('');setFilter('all');}}>{t('clearFilters')}</button></Empty>}
-    <section className="research-notes"><h2>{t('notes')}</h2><p>{t('fixtureNote')}</p></section>
+    {document.sources.some(source=>source.synthetic)?<section className="research-notes"><h2>{t('notes')}</h2><p>{t('fixtureNote')}</p></section>:null}
     <section className="activity"><h2>{t('recentActivity')}</h2>{document.activity.length ? <ul>{document.activity.slice(0,4).map((item,i)=><li key={`${item.at}-${i}`}><time dateTime={item.at}>{formatDate(item.at,document.workspace.locale)}</time><span>{t(activityLabels[item.kind]??item.kind)}</span></li>)}</ul>:<p className="muted">{t('noActivity')}</p>}</section>
   </>;
 }

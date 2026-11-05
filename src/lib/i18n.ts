@@ -1,3 +1,4 @@
+import { projectText } from './projectI18n';
 import type { Locale } from './types';
 
 const en = {
@@ -88,6 +89,7 @@ export type TranslationKey = keyof Messages;
 export function translator(locale: Locale) { return (key: string): string => messages[locale][key as TranslationKey] ?? key; }
 export function errorMessage(error: unknown, locale: Locale): string {
   const raw = String(error); const code = raw.replace(/^Error: /, '').split(':')[0];
+  if(code in projectText.en) return projectText[locale][code as keyof typeof projectText.en];
   return code in en ? translator(locale)(code) : translator(locale)('operationFailed');
 }
 export function formatDate(value: string, locale: Locale) { return new Intl.DateTimeFormat({en:'en-US',ja:'ja-JP',zh:'zh-CN'}[locale], { dateStyle:'short', timeStyle:'short' }).format(new Date(value)); }
