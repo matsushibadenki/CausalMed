@@ -9,7 +9,8 @@ React WebViews (main, inspector)
   └─ typed commands / revision notifications / metadata snapshots
       └─ Rust AppState
           ├─ ResearchStore → Document + WorkspaceState → SQLite
-          └─ Renderer → native Tauri Window → wgpu surface / GPU buffers
+          ├─ Renderer → native Tauri Window → wgpu surface / GPU buffers
+          └─ H5AD Worker supervisor → Python subprocess → read-only backed H5AD
 
 Python reference evaluator (CLI, not yet an app sidecar)
   └─ same scalar M0 protocol and donor-level evaluation
@@ -35,7 +36,7 @@ The bundled dataset is synthetic, scalar-valued and small. `M0-control-mean-v1` 
 
 Training excludes the held-out dataset, the held-out perturbation and all test donor IDs. Donor IDs must be globally normalized upstream. Test data must contain exactly one cell condition, and matched training controls and held-out samples each need two independent donors. Otherwise evaluation abstains. Test controls are never used to fit the baseline. The manifest pins input bytes and train/test sample IDs.
 
-The Python CLI is an independent, dependency-free reference for the same M0 calculations. Connecting a managed Python sidecar, cancellation/progress, H5AD input, multivariate outcomes, M1, confidence intervals, calibration and independent biological validation remains future work.
+The Python CLI is an independent, dependency-free reference for the same M0 calculations. The H5AD worker is now connected independently of the M0 CLI. Multivariate outcomes, M1, confidence intervals, calibration and independent biological validation remain future work.
 
 ## Rendering
 
@@ -48,3 +49,23 @@ GPU resources are stored in Rust AppState; JS sends only a selection command. Wi
 Local desktop only. No server is provisioned and no real clinical data is included. If cloud execution becomes necessary, use XServer VPS Cloud for App VPS, Managed PostgreSQL and NFS; isolated AI workers consume jobs over HTTPS or a queue. No direct worker-to-managed-database assumption.
 
 Technical references checked during implementation: [Tauri Rust commands](https://v2.tauri.app/develop/calling-rust/), [Tauri native WindowBuilder](https://docs.rs/tauri/latest/tauri/window/struct.WindowBuilder.html), [wgpu surface API](https://docs.rs/wgpu/27.0.1/wgpu/struct.Surface.html).
+
+
+## H5AD worker lifecycle
+
+Rust owns a single active import and its last successful report. Commands reserve an import before opening the native picker, so concurrent starts are rejected. The process deadline begins at spawn, excluding time in the picker. Progress is streamed as NDJSON over stdout; a bounded reader and bounded channel enforce a 256 KiB total protocol limit. Stderr is drained without retaining tracebacks. UI receives only bounded metadata snapshots, polled at 150ms while active and 1s while idle; no WebView owns job state.
+
+Cancellation and deadline checks run every 25ms while the supervisor receives messages. Both kill and wait for the child. App exit also requests cancellation and reaps the child. A process result is accepted only after stdout EOF and successful process exit, with no protocol failure or cancellation. The existing report is replaced via a temporary-file rename only after that boundary. The last report is persisted outside the SQLite research Document, is shared through AppState, and is not yet included in research snapshot exports. Runtime job state resets on restart.
+
+The embedded Python script is launched using CAUSALMED_PYTHON, the development .venv, or python3, in that priority. This is a managed subprocess, not yet a packaged standalone sidecar. The source file remains local. SHA-256 pins file bytes; an unchanged size/mtime check detects ordinary concurrent modification. Provenance is unknown unless reviewed; importing a file never automatically declares real/synthetic origin, donor independence or biological validity. AnnData backed mode leaves X on disk, but obs/var and ancillary AnnData metadata can still consume Python memory. Cancellation/timeouts bound duration, not peak memory.
+
+
+## Expression QC and donor mapping
+
+The worker emits only aggregate QC output: three 32-bin histograms, per-rule counts, a union-based retention summary and up to 30 donor groups. No per-cell vector, identifier list or expression matrix is sent to the WebView. Dense/CSR inputs are scanned in row chunks; CSC inputs in column chunks to avoid repeatedly scanning the complete sparse structure. Temporary cell metric vectors stay in Python. The native GPU renderer remains responsible for large interactive rendering; these bounded aggregate charts use lightweight SVG in the UI.
+
+QC checks finite, nonnegative, integer-like stored values before using count-based formulas. Transformed/invalid matrices do not produce retention decisions. Settings select X/raw/layer, feature-index or var-column symbols, a mitochondrial prefix, and thresholds. Missing mitochondrial features yield partial QC; zero-library cells have undefined mitochondrial percentages and are excluded from that histogram. Per-rule exclusion counts overlap, while retained/excluded totals use the union of masks. No source file is filtered.
+
+Donor mapping is an explicit obs-column choice. IDs retain their stored labels; missing or whitespace-only labels remain missing. No biological identity or independence is inferred from the number of labels. Expression filtering does not automatically remove missing donors. This preview does not yet create a reusable cell-selection artifact or connect to M0.
+
+For reanalysis, Rust retains a private source path and checks the requested report checksum. Python hashes the file again and rejects changes. The persisted H5AD JSON now contains an envelope with report and sourcePath; legacy report-only files remain readable and prompt reimport before reanalysis. Draft UI settings are transient; the successfully computed settings in the report are authoritative. Cancellation or failure preserves the last report and source reference.

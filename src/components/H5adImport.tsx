@@ -1,3 +1,5 @@
+import { ExpressionQC } from './ExpressionQC';
+import { qcText } from '../lib/qcI18n';
 import { useState } from 'react';
 import { isTauri } from '@tauri-apps/api/core';
 import { Check, Database, FileUp, LoaderCircle, Square, Timer, TriangleAlert } from 'lucide-react';
@@ -5,7 +7,7 @@ import type { Locale } from '../lib/types';
 import { cancelH5ad, startH5ad, useH5ad, workerActive } from '../lib/h5ad';
 import { h5adText, type H5adTextKey } from '../lib/h5adI18n';
 import { Info, IconButton } from './ui';
-const phases = ['runtime', 'checksum', 'opening', 'annotations', 'validating'] as const;
+const phases = ['runtime', 'checksum', 'opening', 'annotations', 'expression', 'validating'] as const;
 const colors = ['#2a8285', '#516b9c', '#b66339', '#82749b', '#63806a', '#ac8343', '#758591', '#a06772'];
 export function H5adImport({ locale }: { locale: Locale }) {
   const text = h5adText[locale];
@@ -19,7 +21,7 @@ export function H5adImport({ locale }: { locale: Locale }) {
   const keys = Object.keys(report?.groups ?? {});
   const groupKey = keys.includes(selectedGroup) ? selectedGroup : keys[0];
   const group = report?.groups[groupKey];
-  const t = (key: string) => text[key as H5adTextKey] ?? text.worker_failed;
+  const t = (key: string) => text[key as H5adTextKey] ?? qcText[locale][key as keyof typeof qcText.en] ?? text.worker_failed;
   const terminal = !['idle', 'selecting', 'running', 'cancelling'].includes(job.status);
   const warning = ['failed', 'timed_out'].includes(job.status);
   async function run() {
@@ -46,7 +48,8 @@ export function H5adImport({ locale }: { locale: Locale }) {
         <div className="h5ad-stacked" aria-hidden="true">{group.counts.map((row, index) => <span key={index} style={{ width: `${row.count / report.cells * 100}%`, background: colors[index % colors.length] }}/>) }{group.missing + (group.other ?? 0) > 0 ? <span style={{flex: 1, background: '#b8b7b1'}}/> : null}</div>
         <div className="h5ad-category-grid">{[...group.counts, ...(group.other ? [{label: text.other, count: group.other}] : []), ...(group.missing ? [{label: text.missing, count: group.missing}] : [])].map((row, index) => <div className="h5ad-category" key={index}><span className="h5ad-category-dot" style={{background: colors[index % colors.length]}}/><span>{row.label}</span><b>{row.count.toLocaleString()}</b><span className="h5ad-percentage">{(row.count / report.cells * 100).toFixed(1)}%</span></div>)}</div>
       </section> : <p className="source-note">{text.noGroups}</p>}
-      <div className="h5ad-footer"><span>{text.metadata}</span>{!report.obsColumns.some(c => ['donor', 'donor_id'].includes(c)) ? <span><TriangleAlert size={13}/>{text.donorAbsent}</span> : null}<details><summary>{text.obs} · SHA-256</summary><p>{text.columns}: {report.obsColumns.join(', ') || '—'}</p><code>{report.sha256}</code><p>{text.version}: anndata {report.anndataVersion ?? '—'}</p></details></div>
+      <ExpressionQC key={report.sha256 + JSON.stringify(report.qc?.options)} report={report} locale={locale} active={active} canAnalyze={job.canAnalyze} timeout={timeout}/>
+      <div className="h5ad-footer"><span>{text.metadata}</span>{!report.qc?.donor.column && !report.obsColumns.some(c => ['donor', 'donor_id'].includes(c)) ? <span><TriangleAlert size={13}/>{text.donorAbsent}</span> : null}<details><summary>{text.obs} · SHA-256</summary><p>{text.columns}: {report.obsColumns.join(', ') || '—'}</p><code>{report.sha256}</code><p>{text.version}: anndata {report.anndataVersion ?? '—'}</p></details></div>
     </div> : <div className="h5ad-empty"><FileUp size={25} strokeWidth={1.3}/><span>{text.empty}</span></div>}
   </section>;
 }

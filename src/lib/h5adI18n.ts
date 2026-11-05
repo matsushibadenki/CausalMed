@@ -2,7 +2,7 @@ export const h5adText = {
   en: {
     title: 'H5AD datasets', import: 'Import H5AD', cells: 'Cells', genes: 'Genes', size: 'File size',
     duplicates: 'Duplicate IDs', metadata: 'Metadata inspected', missing: 'Missing', other: 'Other',
-    empty: 'Choose a local H5AD file', help: 'Reads annotations and dimensions. Expression values are not quality checked. Source and biological validity remain unverified. Category bars show up to 20 labels.',
+    empty: 'Choose a local H5AD file', help: 'Reads annotations and dimensions. Expression QC is a preview. Source and biological validity remain unverified. Category bars show up to 20 labels.',
     timeout: 'Time limit', cancel: 'Cancel import', cancelling: 'Cancelling…', seconds: 's',
     idle: 'Ready', selecting: 'Choose a file…', running: 'Importing', completed: 'Import complete',
     cancelled: 'Import cancelled', timed_out: 'Time limit reached', failed: 'Import failed',
@@ -19,7 +19,7 @@ export const h5adText = {
   ja: {
     title: 'H5AD データセット', import: 'H5AD を取り込む', cells: '細胞', genes: '遺伝子', size: 'ファイル容量',
     duplicates: '重複 ID', metadata: 'メタデータ確認済み', missing: '欠損', other: 'その他',
-    empty: 'ローカルの H5AD ファイルを選択', help: '注釈と行列の形状を読み取ります。発現値の品質・出典・生物学的妥当性は未検証です。カテゴリは上位20件まで表示します。',
+    empty: 'ローカルの H5AD ファイルを選択', help: '注釈と行列の形状を読み取ります。発現値 QC はプレビューです。出典・生物学的妥当性は未検証です。カテゴリは上位20件まで表示します。',
     timeout: '制限時間', cancel: '取り込みをキャンセル', cancelling: '停止中…', seconds: '秒',
     idle: '待機中', selecting: 'ファイルを選択…', running: '取り込み中', completed: '取り込み完了',
     cancelled: '取り込みをキャンセルしました', timed_out: '制限時間に達しました', failed: '取り込み失敗',
@@ -36,7 +36,7 @@ export const h5adText = {
   zh: {
     title: 'H5AD 数据集', import: '导入 H5AD', cells: '细胞', genes: '基因', size: '文件大小',
     duplicates: '重复 ID', metadata: '元数据已读取', missing: '缺失', other: '其他',
-    empty: '选择本地 H5AD 文件', help: '读取注释和矩阵维度。表达值质量、来源及生物学有效性尚未验证。最多显示前20个类别。',
+    empty: '选择本地 H5AD 文件', help: '读取注释和矩阵维度。表达值 QC 仅为预览，来源及生物学有效性尚未验证。最多显示前20个类别。',
     timeout: '时间限制', cancel: '取消导入', cancelling: '正在停止…', seconds: '秒',
     idle: '就绪', selecting: '选择文件…', running: '正在导入', completed: '导入完成',
     cancelled: '已取消导入', timed_out: '已达到时间限制', failed: '导入失败',

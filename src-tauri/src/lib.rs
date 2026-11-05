@@ -257,13 +257,35 @@ async fn import_h5ad(app: tauri::AppHandle, timeout_seconds: u64) -> Result<(), 
             return;
         };
         match file.into_path() {
-            Ok(path) => state.h5ad.run(
-                &h5ad::python_path(),
-                include_str!("../../python/causalmed_worker/h5ad.py"),
-                &path,
-            ),
+            Ok(path) => state
+                .h5ad
+                .run(&h5ad::python_path(), h5ad::worker_script(), &path),
             Err(_) => state.h5ad.finish("failed", Some("invalid_h5ad")),
         }
+    });
+    Ok(())
+}
+#[tauri::command]
+async fn analyze_h5ad(
+    app: tauri::AppHandle,
+    options: serde_json::Value,
+    sha256: String,
+    timeout_seconds: u64,
+) -> Result<(), String> {
+    if options.to_string().len() > 4096 || !options.is_object() {
+        return Err("invalid_qc_options".into());
+    }
+    let state = app.state::<AppState>();
+    let path = state.h5ad.analysis_source(&sha256)?;
+    state.h5ad.reserve(timeout_seconds)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<AppState>().h5ad.run_analysis(
+            &h5ad::python_path(),
+            h5ad::worker_script(),
+            &path,
+            &options,
+            &sha256,
+        );
     });
     Ok(())
 }
@@ -331,6 +353,7 @@ pub fn run() {
             get_document,
             import_h5ad,
             get_h5ad_state,
+            analyze_h5ad,
             cancel_h5ad,
             import_evidence,
             select_edge,

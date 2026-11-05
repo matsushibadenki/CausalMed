@@ -20,12 +20,14 @@ pub struct Snapshot {
     pub timeout_seconds: u64,
     pub error: Option<String>,
     pub report: Option<Value>,
+    pub can_analyze: bool,
 }
 struct Inner {
     snapshot: Snapshot,
     child: Option<Child>,
     cancel: bool,
     started: Option<Instant>,
+    source_path: Option<PathBuf>,
 }
 pub struct Worker {
     inner: Mutex<Inner>,
@@ -34,9 +36,20 @@ pub struct Worker {
 impl Worker {
     pub fn new(folder: &Path) -> Self {
         let destination = folder.join("h5ad-metadata.json");
-        let report = std::fs::read(&destination)
+        let stored: Option<Value> = std::fs::read(&destination)
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok());
+        let source_path = stored
+            .as_ref()
+            .and_then(|v| v["sourcePath"].as_str())
+            .map(PathBuf::from);
+        let report = stored.map(|v| {
+            if v["report"].is_object() {
+                v["report"].clone()
+            } else {
+                v
+            }
+        });
         Self {
             destination,
             inner: Mutex::new(Inner {
@@ -49,10 +62,12 @@ impl Worker {
                     timeout_seconds: 120,
                     error: None,
                     report,
+                    can_analyze: source_path.is_some(),
                 },
                 child: None,
                 cancel: false,
                 started: None,
+                source_path,
             }),
         }
     }
@@ -95,17 +110,52 @@ impl Worker {
         stop_child(&mut inner);
         finish(&mut inner, status, error);
     }
+    pub fn analysis_source(&self, sha: &str) -> Result<PathBuf, String> {
+        let inner = self.inner.lock().unwrap();
+        if active(&inner.snapshot.status) {
+            return Err("worker_busy".into());
+        }
+        if inner
+            .snapshot
+            .report
+            .as_ref()
+            .and_then(|r| r["sha256"].as_str())
+            != Some(sha)
+        {
+            return Err("file_changed".into());
+        }
+        inner
+            .source_path
+            .clone()
+            .ok_or_else(|| "source_unavailable".into())
+    }
     pub fn run(&self, python: &Path, script: &str, path: &Path) {
+        self.run_analysis(python, script, path, &serde_json::json!({}), "");
+    }
+    pub fn run_analysis(
+        &self,
+        python: &Path,
+        script: &str,
+        path: &Path,
+        options: &Value,
+        sha: &str,
+    ) {
         let mut command = Command::new(python);
         command
             .args(["-u", "-c", script])
             .arg(path)
+            .arg(options.to_string())
+            .arg(sha)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        self.run_command(command);
+        self.run_command_from(command, Some(path.to_path_buf()));
     }
-    fn run_command(&self, mut command: Command) {
+    #[cfg(test)]
+    fn run_command(&self, command: Command) {
+        self.run_command_from(command, None);
+    }
+    fn run_command_from(&self, mut command: Command, source_path: Option<PathBuf>) {
         let (stdout, stderr) = {
             let mut inner = self.inner.lock().unwrap();
             if inner.cancel {
@@ -199,6 +249,7 @@ impl Worker {
                                         "opening",
                                         "annotations",
                                         "validating",
+                                        "expression",
                                     ]
                                     .contains(&phase)
                                 {
@@ -222,6 +273,13 @@ impl Worker {
                                         "python_dependencies_missing"
                                     }
                                     Some("invalid_h5ad") => "invalid_h5ad",
+                                    Some(
+                                        code @ ("invalid_qc_options"
+                                        | "invalid_donor_column"
+                                        | "invalid_gene_column"
+                                        | "invalid_matrix"
+                                        | "file_changed"),
+                                    ) => code,
                                     _ => "worker_failed",
                                 }
                                 .into(),
@@ -255,12 +313,15 @@ impl Worker {
                 } else {
                     let report = report.take().unwrap();
                     let temporary = self.destination.with_extension("tmp");
-                    let saved = serde_json::to_vec(&report)
+                    let stored = serde_json::json!({"report": report, "sourcePath": source_path});
+                    let saved = serde_json::to_vec(&stored)
                         .ok()
                         .and_then(|b| std::fs::write(&temporary, b).ok())
                         .and_then(|_| std::fs::rename(&temporary, &self.destination).ok());
                     if saved.is_some() {
                         inner.snapshot.report = Some(report);
+                        inner.snapshot.can_analyze = source_path.is_some();
+                        inner.source_path = source_path.clone();
                         inner.snapshot.percent = 100;
                         finish(&mut inner, "completed", None);
                     } else {
@@ -268,6 +329,10 @@ impl Worker {
                     }
                 }
                 break;
+            }
+            if disconnected && exited.is_none() {
+                drop(inner);
+                std::thread::sleep(Duration::from_millis(25));
             }
         }
         drop(rx); // Unblock a writer if cancellation occurred while its queue was full.
@@ -307,6 +372,13 @@ fn valid_report(r: &Value) -> bool {
         && r["duplicateCellIds"].as_u64().is_some()
         && r["duplicateGeneIds"].as_u64().is_some()
 }
+pub fn worker_script() -> &'static str {
+    concat!(
+        include_str!("../../python/causalmed_worker/qc.py"),
+        "\n",
+        include_str!("../../python/causalmed_worker/h5ad.py")
+    )
+}
 pub fn python_path() -> PathBuf {
     if let Some(path) = std::env::var_os("CAUSALMED_PYTHON") {
         return path.into();
@@ -335,6 +407,60 @@ mod tests {
     fn success() -> String {
         let report = serde_json::json!({"schemaVersion":1,"name":"test.h5ad","cells":10,"genes":20,"sha256":"a".repeat(64),"groups":{},"obsColumns":[],"duplicateCellIds":0,"duplicateGeneIds":0});
         format!("import json\nprint(json.dumps({{'type':'progress','percent':50,'phase':'checksum'}}),flush=True)\nprint({:?},flush=True)", serde_json::json!({"type":"result","report":report}).to_string())
+    }
+    #[test]
+    #[ignore = "requires CAUSALMED_TEST_H5AD public PBMC3k file and anndata"]
+    fn imports_public_h5ad_through_supervised_python_process() {
+        let path = std::env::var("CAUSALMED_TEST_H5AD").expect("Set CAUSALMED_TEST_H5AD");
+        let folder = tempfile::tempdir().unwrap();
+        let worker = Worker::new(folder.path());
+        worker.reserve(120).unwrap();
+        worker.run(&python_path(), worker_script(), Path::new(&path));
+        let snapshot = worker.snapshot();
+        assert_eq!(snapshot.status, "completed", "{:?}", snapshot.error);
+        let report = snapshot.report.unwrap();
+        assert_eq!(report["cells"], 2638);
+        assert_eq!(report["genes"], 1838);
+        assert_eq!(report["groups"]["louvain"]["distinct"], 8);
+        assert_eq!(
+            Worker::new(folder.path()).snapshot().report.unwrap()["sha256"],
+            report["sha256"]
+        );
+    }
+    #[test]
+    #[ignore = "requires CAUSALMED_TEST_DONOR_H5AD and anndata"]
+    fn donor_mapping_qc_and_source_reference_survive_restart() {
+        let path = std::env::var("CAUSALMED_TEST_DONOR_H5AD").unwrap();
+        let folder = tempfile::tempdir().unwrap();
+        let worker = Worker::new(folder.path());
+        worker.reserve(120).unwrap();
+        worker.run(&python_path(), worker_script(), Path::new(&path));
+        let report = worker.snapshot().report.unwrap();
+        let sha = report["sha256"].as_str().unwrap();
+        let restored = Worker::new(folder.path());
+        assert!(restored.snapshot().can_analyze);
+        let path = restored.analysis_source(sha).unwrap();
+        restored.reserve(120).unwrap();
+        restored.run_analysis(
+            &python_path(),
+            worker_script(),
+            &path,
+            &serde_json::json!({"donorColumn":"replicate","minGenes":600}),
+            sha,
+        );
+        let result = restored.snapshot();
+        assert_eq!(result.status, "completed", "{:?}", result.error);
+        let result = result.report.unwrap();
+        assert_eq!(result["qc"]["donor"]["column"], "replicate");
+        assert_eq!(result["qc"]["donor"]["distinct"], 8);
+        assert!(
+            result["qc"]["retained"].as_u64().unwrap() < report["qc"]["retained"].as_u64().unwrap()
+        );
+        assert!(restored.analysis_source("wrong-sha").is_err());
+        assert_eq!(
+            Worker::new(folder.path()).snapshot().report.unwrap()["qc"]["options"]["minGenes"],
+            600
+        );
     }
     #[test]
     fn success_is_persisted_only_after_clean_exit_and_restored() {
