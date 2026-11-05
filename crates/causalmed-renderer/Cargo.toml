@@ -1,0 +1,10 @@
+[package]
+name = "causalmed-renderer"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+wgpu = "27"
+bytemuck = { version = "1", features = ["derive"] }
+causalmed-core = { path = "../causalmed-core" }
+

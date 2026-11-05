@@ -1,0 +1,28 @@
+[package]
+name = "causalmed"
+version.workspace = true
+edition.workspace = true
+description = "Evidence-first causal research workspace"
+
+[lib]
+name = "causalmed_app"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[features]
+default = []
+custom-protocol = ["tauri/custom-protocol"]
+
+[dependencies]
+tauri = { version = "2", features = ["unstable"] }
+serde.workspace = true
+serde_json.workspace = true
+causalmed-core = { path = "../crates/causalmed-core" }
+causalmed-renderer = { path = "../crates/causalmed-renderer" }
+pollster = "0.4"
+tauri-plugin-dialog = "2"
+
+[dev-dependencies]
+tempfile = "3"

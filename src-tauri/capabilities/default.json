@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "workspace",
+  "description": "Local research windows can subscribe to Rust-owned document revisions.",
+  "windows": ["main", "inspector"],
+  "permissions": ["core:default"]
+}

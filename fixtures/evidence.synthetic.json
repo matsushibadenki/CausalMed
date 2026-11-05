@@ -1,0 +1,91 @@
+{
+  "schemaVersion": 1,
+  "sources": [
+    {
+      "id": "SYN-001",
+      "title": "synthetic_source",
+      "locator": "fixture://causalmed/evidence-v1",
+      "license": "CC0-1.0",
+      "version": "1.0",
+      "synthetic": true
+    }
+  ],
+  "edges": [
+    {
+      "id": "E-001",
+      "source": "GENE-A",
+      "target": "GENE-B",
+      "relation": "activates",
+      "evidence": "intervention",
+      "sourceId": "SYN-001",
+      "cellType": "synthetic_fibroblast",
+      "context": "in_vitro_fixture",
+      "excerpt": "synthetic_excerpt",
+      "contradictions": [
+        "E-006"
+      ]
+    },
+    {
+      "id": "E-002",
+      "source": "GENE-B",
+      "target": "GENE-C",
+      "relation": "associated",
+      "evidence": "observation",
+      "sourceId": "SYN-001",
+      "cellType": "synthetic_fibroblast",
+      "context": "in_vitro_fixture",
+      "excerpt": "synthetic_excerpt",
+      "contradictions": []
+    },
+    {
+      "id": "E-003",
+      "source": "GENE-C",
+      "target": "GENE-D",
+      "relation": "inhibits",
+      "evidence": "hypothesis",
+      "sourceId": "SYN-001",
+      "cellType": "synthetic_fibroblast",
+      "context": "in_vitro_fixture",
+      "excerpt": "synthetic_excerpt",
+      "contradictions": []
+    },
+    {
+      "id": "E-004",
+      "source": "GENE-D",
+      "target": "GENE-E",
+      "relation": "associated",
+      "evidence": "observation",
+      "sourceId": "SYN-001",
+      "cellType": "synthetic_fibroblast",
+      "context": "in_vitro_fixture",
+      "excerpt": "synthetic_excerpt",
+      "contradictions": []
+    },
+    {
+      "id": "E-005",
+      "source": "GENE-E",
+      "target": "STATE-F",
+      "relation": "inhibits",
+      "evidence": "hypothesis",
+      "sourceId": "SYN-001",
+      "cellType": "synthetic_fibroblast",
+      "context": "in_vitro_fixture",
+      "excerpt": "synthetic_excerpt",
+      "contradictions": []
+    },
+    {
+      "id": "E-006",
+      "source": "GENE-A",
+      "target": "GENE-B",
+      "relation": "inhibits",
+      "evidence": "intervention",
+      "sourceId": "SYN-001",
+      "cellType": "synthetic_fibroblast",
+      "context": "in_vitro_fixture",
+      "excerpt": "synthetic_excerpt",
+      "contradictions": [
+        "E-001"
+      ]
+    }
+  ]
+}
