@@ -1,3 +1,4 @@
+import { resourceText } from '../lib/resourceI18n';
 import { SourceRelink } from './SourceRelink';
 import { projectText } from '../lib/projectI18n';
 import { historyText } from '../lib/historyI18n';
@@ -14,7 +15,7 @@ import { h5adText, type H5adTextKey } from '../lib/h5adI18n';
 import { Info, IconButton } from './ui';
 const phases = ['runtime', 'checksum', 'opening', 'annotations', 'expression', 'validating'] as const;
 const colors = ['#2a8285', '#516b9c', '#b66339', '#82749b', '#63806a', '#ac8343', '#758591', '#a06772'];
-export function H5adImport({ locale }: { locale: Locale }) {
+export function H5adImport({ locale, sourceSha256='' }: { locale: Locale;sourceSha256?:string }) {
   const text = h5adText[locale];
   const job = useH5ad();
   const report = job.report;
@@ -33,7 +34,7 @@ export function H5adImport({ locale }: { locale: Locale }) {
   const keys = Object.keys(report?.groups ?? {});
   const groupKey = keys.includes(selectedGroup) ? selectedGroup : keys[0];
   const group = report?.groups[groupKey];
-  const t = (key: string) => text[key as H5adTextKey] ?? xt[key as keyof typeof xt] ?? qcText[locale][key as keyof typeof qcText.en] ?? text.worker_failed;
+  const t = (key: string) => resourceText[locale][key as keyof typeof resourceText.en] ?? text[key as H5adTextKey] ?? xt[key as keyof typeof xt] ?? qcText[locale][key as keyof typeof qcText.en] ?? text.worker_failed;
   const terminal = !['idle', 'selecting', 'running', 'cancelling'].includes(job.status);
   const warning = ['failed', 'timed_out'].includes(job.status);
   async function run() {
@@ -54,7 +55,7 @@ export function H5adImport({ locale }: { locale: Locale }) {
       {report && ['cancelled', 'timed_out', 'failed'].includes(job.status) ? <small>{exporting?xt.noOutput:text.retained}</small> : null}
     </div> : null}
     <SourceRelink key={report?.selection?.id} locale={locale} timeout={timeout}/>
-    <QcHistory locale={locale} job={job} active={active}/>
+    <QcHistory locale={locale} job={job} active={active} sourceSha256={sourceSha256}/>
     {report ? <div className="h5ad-report">
       <div className="h5ad-file-heading"><h3>{report.name}</h3><span className="neutral-label">{text.unknown}</span></div>
       <dl className="h5ad-metrics"><div><dt>{text.cells}</dt><dd>{report.cells.toLocaleString()}</dd></div><div><dt>{text.genes}</dt><dd>{report.genes.toLocaleString()}</dd></div><div><dt>{text.size}</dt><dd>{report.bytes ? `${(report.bytes / 1024 / 1024).toFixed(1)} MB` : '—'}</dd></div><div className={report.duplicateCellIds + report.duplicateGeneIds > 0 ? 'metric-warning' : ''}><dt>{text.duplicates}</dt><dd>{(report.duplicateCellIds + report.duplicateGeneIds).toLocaleString()}</dd></div></dl>

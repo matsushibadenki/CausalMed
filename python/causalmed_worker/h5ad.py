@@ -44,6 +44,17 @@ def inspect(path, progress=lambda percent, phase: None, options=None, expected_s
         if data.n_obs == 0 or data.n_vars == 0:
             raise ValueError('empty_h5ad')
         columns = [str(c) for c in data.obs.columns]
+        obs_schema = []
+        for name in columns[:256]:
+            if len(name.encode("utf-8")) > 500:
+                continue
+            column = data.obs[name]
+            dtype = column.dtype
+            kind = ('categorical' if isinstance(dtype, pd.CategoricalDtype) else
+                    'boolean' if pd.api.types.is_bool_dtype(dtype) else
+                    'numeric' if pd.api.types.is_numeric_dtype(dtype) else
+                    'string' if pd.api.types.is_string_dtype(dtype) else 'unknown')
+            obs_schema.append({'name': name, 'dtype': str(dtype)[:100], 'kind': kind, 'nullable': bool(column.isna().any())})
         groups = {}
         # Prefer research annotations, then actual categorical annotations (e.g. louvain).
         preferred = ('donor', 'donor_id', 'cell_type', 'celltype', 'perturbation', 'condition', 'louvain', 'leiden')
@@ -54,12 +65,15 @@ def inspect(path, progress=lambda percent, phase: None, options=None, expected_s
             counts = series.dropna().value_counts()
             groups[str(key)[:200]] = {
                 'distinct': len(counts), 'missing': int(series.isna().sum()),
+                'complete': len(counts) <= 20 and all(len(str(k).encode('utf-8')) <= 200 for k in counts.index),
                 'other': int(counts.iloc[20:].sum()),
                 'counts': [{'label': str(k)[:200], 'count': int(v)} for k, v in counts.iloc[:20].items()],
             }
             progress(65 + int(5 * (index + 1) / max(len(candidates), 1)), 'annotations')
         selection = {}
         qc = quality_control(data, options, progress, selection.update if artifact_dir else None)
+        # Bind bounded annotation context to the immutable QC manifest.
+        qc['annotationContext'] = {key: {**group, 'counts': group['counts'] if group['complete'] and group['distinct'] == 1 else []} for key, group in groups.items()}
         progress(95, 'validating')
         after = path.stat()
         if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
@@ -67,18 +81,36 @@ def inspect(path, progress=lambda percent, phase: None, options=None, expected_s
         report = {'schemaVersion': 1, 'name': path.name[:500], 'sha256': digest.hexdigest(),
                 'bytes': before.st_size, 'cells': data.n_obs, 'genes': data.n_vars,
                 'obsColumns': [c[:200] for c in columns[:200]], 'totalObsColumns': len(columns),
+                'obsSchema': obs_schema, 'obsSchemaTruncated': len(obs_schema) < len(columns),
                 'duplicateCellIds': int(data.obs_names.duplicated().sum()),
                 'duplicateGeneIds': int(data.var_names.duplicated().sum()), 'groups': groups,
                 'synthetic': None, 'validation': 'expression_qc', 'anndataVersion': version('anndata'),
                 'matrices': ['X'] + (['raw'] if data.raw is not None else []) + ['layer:' + str(k) for k in list(data.layers)[:30]],
                 'geneColumns': [str(k) for k in data.var.columns[:100]],
                 'rawGeneColumns': [str(k) for k in data.raw.var.columns[:100]] if data.raw is not None else [], 'qc': qc}
+        origins = []
+        for key in sorted(data.uns):
+            if str(key).startswith('causalmed_cohort_') and len(origins) < 8:
+                try:
+                    origin = data.uns[key]
+                    raw = str(origin['definition_json'])
+                    if len(raw.encode('utf-8')) > 65536 or hashlib.sha256(raw.encode('utf-8')).hexdigest() != origin['definition_sha256']:
+                        continue
+                    payload = json.loads(raw)
+                    origins.append({'definitionId': payload['id'], 'definitionSha256': str(origin['definition_sha256']), 'sourceSha256': payload['sourceSha256'], 'parentQcId': payload['alignment']['observation']['qcId'], 'retained': int(origin['retained'])})
+                except (KeyError, TypeError, ValueError):
+                    continue
+        report['cohortOrigins'] = origins
         if artifact_dir and selection:
             progress(97, 'selection')
             report['selection'] = save_selection(artifact_dir, report, selection)
         return report
     finally:
         data.file.close()
+
+
+if 'inspect_outcome' not in globals():
+    from causalmed_worker.outcome import inspect_outcome
 
 
 def main():
@@ -97,10 +129,12 @@ def main():
             if digest.hexdigest() != job['sha256'] or (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
                 raise ValueError('file_changed')
             emit({'type': 'result', 'report': {'sha256': digest.hexdigest()}})
+        elif job.get('operation') == 'inspect_outcome':
+            emit({'type': 'result', 'report': inspect_outcome(job['context'], job['contextSha256'], job['inputs'], progress)})
         elif job.get('operation') == 'compare':
             emit({'type': 'result', 'report': compare_selections(job['leftDir'], job['left'], job['rightDir'], job['right'])})
         elif job.get('operation', '').startswith('export_'):
-            receipt = export_selection(sys.argv[1], job['selectionDir'], job['output'], job['selection'], job['operation'], progress)
+            receipt = export_selection(sys.argv[1], job['selectionDir'], job['output'], job['selection'], job['operation'], progress, job.get('definition'))
             emit({'type': 'export_result', 'report': receipt})
         else:
             report = inspect(sys.argv[1], progress, json.loads(sys.argv[2]) if len(sys.argv) > 2 else None, sys.argv[3] if len(sys.argv) > 3 else None, job.get('artifactDir'))
@@ -109,7 +143,7 @@ def main():
     except ModuleNotFoundError:
         emit({'type': 'error', 'code': 'python_dependencies_missing'})
     except ValueError as error:
-        code = str(error) if str(error) in ('invalid_qc_options', 'invalid_donor_column', 'invalid_gene_column', 'invalid_matrix', 'file_changed', 'selection_changed', 'source_conflict', 'empty_selection', 'metadata_collision', 'invalid_export', 'export_verification_failed') else 'invalid_h5ad'
+        code = str(error) if str(error) in ('invalid_qc_options', 'invalid_donor_column', 'invalid_gene_column', 'invalid_matrix', 'file_changed', 'selection_changed', 'source_conflict', 'empty_selection', 'metadata_collision', 'invalid_export', 'export_verification_failed', 'unsupported_export_encoding') else 'invalid_h5ad'
         emit({'type': 'error', 'code': code})
     except (OSError, KeyError, TypeError):
         emit({'type': 'error', 'code': 'invalid_h5ad'})

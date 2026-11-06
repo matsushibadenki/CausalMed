@@ -128,7 +128,7 @@ def quality_control(data, options, progress=lambda percent, phase: None, selecti
         if available_mito and (~zero).any():
             metrics['mito'] = _histogram(percent[~zero], None, o['maxMitoPct'])
     donor = {'column': o['donorColumn'], 'distinct': 0, 'missing': n, 'missingRetained': None,
-             'groups': [], 'otherCells': 0, 'identityVerified': False}
+             'groups': [], 'otherCells': 0, 'identityVerified': False, 'inventoryComplete': False}
     if o['donorColumn']:
         labels = data.obs[o['donorColumn']].astype('string')
         absent = labels.isna() | labels.str.strip().eq('').fillna(True)
@@ -138,6 +138,7 @@ def quality_control(data, options, progress=lambda percent, phase: None, selecti
         donor.update({'distinct': len(counts), 'missing': int(absent.sum()),
                       'missingRetained': int((absent.to_numpy() & passed).sum()) if valid else None,
                       'otherCells': int(counts.iloc[30:].sum()),
+                      'inventoryComplete': len(counts) <= 30 and all(len(str(key).encode('utf-8')) <= 200 for key in counts.index),
                       'groups': [{'label': str(key)[:200], 'cells': int(value),
                                   'retained': int(retained.get(key, 0)) if valid else None}
                                  for key, value in counts.iloc[:30].items()]})

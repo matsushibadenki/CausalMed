@@ -19,11 +19,12 @@ use std::{
 static CACHE_GATE: Mutex<()> = Mutex::new(());
 const SCHEMA: &str = "
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-INSERT INTO meta VALUES('version','2');
+INSERT INTO meta VALUES('version','3');
 CREATE TABLE rows (id TEXT PRIMARY KEY, payload TEXT NOT NULL, search TEXT NOT NULL,
  name TEXT NOT NULL, created TEXT NOT NULL, retained INTEGER, excluded INTEGER,
  mapped INTEGER NOT NULL, status TEXT NOT NULL, histories INTEGER NOT NULL,
- active INTEGER NOT NULL, linked INTEGER NOT NULL, trashed INTEGER NOT NULL);
+ active INTEGER NOT NULL, linked INTEGER NOT NULL, trashed INTEGER NOT NULL, source_sha256 TEXT NOT NULL);
+CREATE INDEX by_source ON rows(source_sha256,trashed,id);
 CREATE INDEX by_trash ON rows(trashed,id);
 CREATE INDEX by_created ON rows(created,id);
 CREATE INDEX by_name ON rows(name,id);
@@ -45,7 +46,7 @@ fn open(path: &Path) -> Result<Connection, String> {
             c.query_row("SELECT value FROM meta WHERE key='version'", [], |r| {
                 r.get(0)
             })?;
-        if version != "2" {
+        if version != "3" {
             return Err(rusqlite::Error::InvalidQuery);
         }
         // Access both tables so missing FTS structures trigger a rebuild as well.
@@ -114,10 +115,11 @@ struct Entry<'a, T> {
     active: bool,
     linked: bool,
     trashed: bool,
+    source_sha256: String,
 }
 fn upsert<T: Serialize>(c: &Connection, e: Entry<'_, T>) -> Result<(), String> {
-    c.execute("INSERT INTO rows(id,payload,search,name,created,retained,excluded,mapped,status,histories,active,linked,trashed) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,search=excluded.search,name=excluded.name,created=excluded.created,retained=excluded.retained,excluded=excluded.excluded,mapped=excluded.mapped,status=excluded.status,histories=excluded.histories,active=excluded.active,linked=excluded.linked,trashed=excluded.trashed WHERE rows.payload<>excluded.payload",
-        params![e.id,serde_json::to_string(e.payload).map_err(error)?,e.search.to_lowercase(),e.name.to_lowercase(),e.created,e.retained,e.excluded,e.mapped,e.status,e.histories,e.active,e.linked,e.trashed]).map_err(error)?;
+    c.execute("INSERT INTO rows(id,payload,search,name,created,retained,excluded,mapped,status,histories,active,linked,trashed,source_sha256) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,search=excluded.search,name=excluded.name,created=excluded.created,retained=excluded.retained,excluded=excluded.excluded,mapped=excluded.mapped,status=excluded.status,histories=excluded.histories,active=excluded.active,linked=excluded.linked,trashed=excluded.trashed,source_sha256=excluded.source_sha256 WHERE rows.payload<>excluded.payload",
+        params![e.id,serde_json::to_string(e.payload).map_err(error)?,e.search.to_lowercase(),e.name.to_lowercase(),e.created,e.retained,e.excluded,e.mapped,e.status,e.histories,e.active,e.linked,e.trashed,e.source_sha256]).map_err(error)?;
     Ok(())
 }
 fn put_history(c: &Connection, r: &HistoryRow, trashed: bool) -> Result<(), String> {
@@ -142,6 +144,7 @@ fn put_history(c: &Connection, r: &HistoryRow, trashed: bool) -> Result<(), Stri
             active: false,
             linked: false,
             trashed,
+            source_sha256: r.source_sha256.clone(),
         },
     )
 }
@@ -282,6 +285,7 @@ pub(crate) fn projects(
                 active: r.active,
                 linked: r.source_linked,
                 trashed: r.trashed,
+                source_sha256: r.source_sha256.clone().unwrap_or_default(),
             },
         )?;
     }
@@ -301,6 +305,10 @@ fn query<T: DeserializeOwned>(
 ) -> Result<Page<T>, String> {
     let mut clauses = vec!["trashed=?".to_string()];
     let mut values: Vec<SqlValue> = vec![i64::from(q.trash).into()];
+    if !q.source_sha256.is_empty() {
+        clauses.push("source_sha256=?".into());
+        values.push(q.source_sha256.clone().into());
+    }
     let tokens: Vec<_> = q.search.split_whitespace().map(str::to_lowercase).collect();
     let terms: Vec<_> = tokens
         .iter()
@@ -385,6 +393,34 @@ fn query<T: DeserializeOwned>(
     })
 }
 
+pub(crate) fn dataset_counts(
+    worker: &Worker,
+    hashes: &[String],
+) -> Result<std::collections::BTreeMap<String, [usize; 2]>, String> {
+    let _gate = CACHE_GATE.lock().map_err(error)?;
+    let c = reconcile(worker)?;
+    let mut counts = std::collections::BTreeMap::new();
+    let mut stmt = c
+        .prepare("SELECT trashed,count(*) FROM rows WHERE source_sha256=?1 GROUP BY trashed")
+        .map_err(error)?;
+    for hash in hashes {
+        let mut values = [0; 2];
+        for row in stmt
+            .query_map([hash], |r| {
+                Ok((r.get::<_, usize>(0)?, r.get::<_, usize>(1)?))
+            })
+            .map_err(error)?
+        {
+            let (bucket, count) = row.map_err(error)?;
+            if bucket < 2 {
+                values[bucket] = count;
+            }
+        }
+        counts.insert(hash.clone(), values);
+    }
+    Ok(counts)
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -397,8 +433,8 @@ pub(crate) mod tests {
         let selection_sha = causalmed_core::checksum(cell_bytes);
         fs::write(dir.join("cells.npz"), cell_bytes).unwrap();
         let qc = json!({"status":"partial","options":{"donorColumn":if i.is_multiple_of(2){"replicate"}else{""},"minGenes":200},"retained":i,"excluded":10001-i});
-        let manifest=json!({"analysisId":id,"source":{"cells":10001,"genes":5,"sha256":"synthetic"},"qc":qc,"selectionSha256":selection_sha}).to_string();
-        let report = json!({"report":{"name":format!("Synthetic load fixture {i:05} 東京 %_ \"quote\""),"cells":10001,"genes":5,"sha256":"synthetic","qc":qc,"selection":{"id":id,"createdAt":"2026-11-05T00:00:00Z","retained":i,"excluded":10001-i,"sha256":selection_sha,"manifestSha256":causalmed_core::checksum(manifest.as_bytes())}}});
+        let manifest=json!({"analysisId":id,"source":{"cells":10001,"genes":5,"sha256":if i.is_multiple_of(2){"a".repeat(64)}else{"b".repeat(64)}},"qc":qc,"selectionSha256":selection_sha}).to_string();
+        let report = json!({"report":{"name":format!("Synthetic load fixture {i:05} 東京 %_ \"quote\""),"cells":10001,"genes":5,"sha256":if i.is_multiple_of(2){"a".repeat(64)}else{"b".repeat(64)},"qc":qc,"selection":{"id":id,"createdAt":"2026-11-05T00:00:00Z","retained":i,"excluded":10001-i,"sha256":selection_sha,"manifestSha256":causalmed_core::checksum(manifest.as_bytes())}}});
         fs::write(dir.join("manifest.json"), manifest).unwrap();
         fs::write(dir.join("report.json"), report.to_string()).unwrap();
         id
@@ -433,6 +469,27 @@ pub(crate) mod tests {
         assert_eq!(cold.total, 10000);
         assert_eq!(cold.pages, 200);
         assert_eq!(cold.items.len(), 50);
+        let by_source = browse(
+            &aw,
+            Query {
+                source_sha256: "a".repeat(64),
+                ..Default::default()
+            },
+        );
+        assert_eq!(by_source.total, 5000);
+        assert!(by_source
+            .items
+            .iter()
+            .all(|r| r.source_sha256 == "a".repeat(64)));
+        let counts = dataset_counts(&aw, &["a".repeat(64), "b".repeat(64)]).unwrap();
+        assert_eq!(counts[&"a".repeat(64)], [5000, 0]);
+        assert_eq!(counts[&"b".repeat(64)], [5000, 0]);
+        assert_eq!(
+            dataset_counts(&bw, &["a".repeat(64)]).unwrap()[&"a".repeat(64)],
+            [1, 0]
+        );
+
+        crate::h5ad::HISTORY_READS.with(|n| n.set(0));
         let cache = a.path().join("history-search.sqlite3");
         let before = modified(&cache);
         let start = std::time::Instant::now();
@@ -445,6 +502,7 @@ pub(crate) mod tests {
                 page: 100,
                 page_size: 50,
                 trash: false,
+                source_sha256: String::new(),
             },
         );
         let warm_ms = start.elapsed().as_millis();
@@ -557,6 +615,22 @@ pub(crate) mod tests {
         crate::h5ad::HISTORY_READS.with(|n| n.set(0));
         assert_eq!(browse(&aw, Query::default()).total, 9000);
         assert_eq!(
+            dataset_counts(&aw, &["a".repeat(64)]).unwrap()[&"a".repeat(64)],
+            [4500, 500]
+        );
+        assert_eq!(
+            browse(
+                &aw,
+                Query {
+                    source_sha256: "a".repeat(64),
+                    trash: true,
+                    ..Default::default()
+                }
+            )
+            .total,
+            500
+        );
+        assert_eq!(
             browse(
                 &aw,
                 Query {
@@ -599,6 +673,10 @@ pub(crate) mod tests {
         assert_eq!(restored.succeeded.len(), 1000);
         assert!(restored.failed.is_empty());
         assert_eq!(browse(&restarted, Query::default()).total, 10000);
+        assert_eq!(
+            dataset_counts(&restarted, &["a".repeat(64)]).unwrap()[&"a".repeat(64)],
+            [5000, 0]
+        );
         assert_eq!(
             browse(
                 &restarted,

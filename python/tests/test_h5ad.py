@@ -24,7 +24,7 @@ class H5adTests(unittest.TestCase):
         for matrix in (np.ones((4, 3)), sparse.csr_matrix(np.ones((4, 3)))):
             with self.subTest(matrix=type(matrix).__name__), tempfile.TemporaryDirectory() as directory:
                 path = Path(directory) / 'fixture.synthetic.h5ad'
-                data = ad.AnnData(matrix, obs=pd.DataFrame({'donor_id': ['D1', 'D1', 'D2', None], 'louvain': pd.Categorical(['A','A','B','B'])}, index=['c1','c2','c3','c4']))
+                data = ad.AnnData(matrix, obs=pd.DataFrame({'donor_id': ['D1', 'D1', 'D2', None], 'louvain': pd.Categorical(['A','A','B','B']), 'condition': pd.Categorical(['QA']*4)}, index=['c1','c2','c3','c4']))
                 data.write_h5ad(path)
                 stages = []
                 report = inspect(path, lambda percent, phase: stages.append((percent, phase)))
@@ -33,6 +33,13 @@ class H5adTests(unittest.TestCase):
                 self.assertEqual(report['groups']['donor_id']['missing'], 1)
                 self.assertEqual(report['groups']['louvain']['counts'][0]['count'], 2)
                 self.assertEqual(stages, sorted(stages))
+                self.assertEqual(report['obsSchema'][0], {'name':'donor_id','dtype':'category','kind':'categorical','nullable':True})
+                self.assertFalse(report['obsSchemaTruncated'])
+                self.assertTrue(report['groups']['donor_id']['complete'])
+                self.assertEqual(report['qc']['annotationContext']['donor_id']['distinct'], 2)
+                self.assertEqual(report['qc']['annotationContext']['donor_id']['counts'], [])
+                self.assertEqual(report['qc']['annotationContext']['condition']['counts'], [{'label':'QA','count':4}])
+                self.assertTrue(report['qc']['annotationContext']['condition']['complete'])
                 self.assertIsNone(report['synthetic'])  # Never infer biological provenance from a filename.
 
     def test_duplicate_ids_and_category_tail(self):

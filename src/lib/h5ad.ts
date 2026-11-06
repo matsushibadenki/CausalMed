@@ -6,18 +6,21 @@ export type QcReport = { version:number;status:string;options:QcOptions;features
 export type QcSelection = {id:string;createdAt:string;sha256:string;manifestSha256:string;retained:number;excluded:number};
 export type ExportReceipt = {kind:string;selectionId:string;fileName:string;sha256:string;bytes:number;retained:number;excluded:number};
 export type H5adReport = {
-  selection?:QcSelection; name: string; cells: number; genes: number; bytes?: number; sha256: string;
+  cohortOrigins?:{definitionId:string;definitionSha256:string;sourceSha256:string;parentQcId:string;retained:number}[]; selection?:QcSelection; name: string; cells: number; genes: number; bytes?: number; sha256: string;
   duplicateCellIds: number; duplicateGeneIds: number; obsColumns: string[];
   anndataVersion?: string; matrices?: string[]; geneColumns?: string[]; rawGeneColumns?: string[]; qc?:QcReport;
-  groups: Record<string, { distinct: number; missing: number; other?: number; counts: { label: string; count: number }[] }>;
+  groups: Record<string, { complete?:boolean; distinct: number; missing: number; other?: number; counts: { label: string; count: number }[] }>;
 };
+export type ResourceLimits={memoryMib:number;cpuSeconds:number;threads:number};
 export type H5adState = {
+  runtime:{kind:string;pythonVersion:string|null;anndataVersion:string|null;error:string|null};
+  resources:{residentBytes:number;peakResidentBytes:number;cpuMillis:number;samples:number};executionLimits:ResourceLimits|null;resourceSettings:{version:number;revision:number;limits:ResourceLimits};resourceSettingsInvalid:boolean;resourceMonitorSupported:boolean;
   projectKey:string;sourceLinked:boolean;sourceName:string|null;
   comparison:{leftId:string;rightId:string;comparable:boolean;bothRetained?:number;bothExcluded?:number;removed?:number;added?:number}|null;
   id: number; status: string; percent: number; phase: string; elapsedMs: number;
   timeoutSeconds: number; operation:string;lastExport:ExportReceipt|null;canAnalyze:boolean; error: string | null; report: H5adReport | null;
 };
-const initial: H5adState = { projectKey:'',sourceLinked:false,sourceName:null, comparison:null, id: 0, status: 'idle', percent: 0, phase: 'runtime', elapsedMs: 0, timeoutSeconds: 120, operation:'analysis',lastExport:null,canAnalyze:false, error: null, report: null };
+const initial: H5adState = {runtime:{kind:"unavailable",pythonVersion:null,anndataVersion:null,error:null},resources:{residentBytes:0,peakResidentBytes:0,cpuMillis:0,samples:0},executionLimits:null,resourceSettings:{version:1,revision:0,limits:{memoryMib:2048,cpuSeconds:300,threads:2}},resourceSettingsInvalid:false,resourceMonitorSupported:true, projectKey:'',sourceLinked:false,sourceName:null, comparison:null, id: 0, status: 'idle', percent: 0, phase: 'runtime', elapsedMs: 0, timeoutSeconds: 120, operation:'analysis',lastExport:null,canAnalyze:false, error: null, report: null };
 let snapshot = initial;
 const subscribers = new Set<() => void>();
 let timer: ReturnType<typeof setTimeout> | undefined;

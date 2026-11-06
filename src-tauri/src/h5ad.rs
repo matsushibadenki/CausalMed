@@ -1,3 +1,4 @@
+use crate::resources;
 use serde::Serialize;
 use serde_json::Value;
 use std::{
@@ -11,6 +12,9 @@ use std::{
 use tempfile::{NamedTempFile, TempDir};
 
 enum RunOutput {
+    Outcome {
+        context: causalmed_core::evaluation::EvaluationContext,
+    },
     Relink {
         source: PathBuf,
         sha256: String,
@@ -46,12 +50,19 @@ pub struct Snapshot {
     pub phase: String,
     pub elapsed_ms: u64,
     pub timeout_seconds: u64,
+    pub resources: resources::Usage,
+    pub execution_limits: Option<resources::Limits>,
+    pub resource_settings: resources::Settings,
+    pub resource_settings_invalid: bool,
+    pub resource_monitor_supported: bool,
+    pub runtime: crate::runtime::Info,
     pub error: Option<String>,
     pub report: Option<Value>,
     pub can_analyze: bool,
     pub operation: String,
     pub last_export: Option<Value>,
     pub comparison: Option<Value>,
+    pub outcome_report: Option<Value>,
     pub source_linked: bool,
     pub project_key: String,
     pub source_name: Option<String>,
@@ -97,6 +108,7 @@ impl Worker {
         if let Some(path) = bindings[sha].as_str() {
             source_path = Some(path.into());
         }
+        let (resource_settings, resource_settings_invalid) = resources::load(folder);
         Self {
             destination,
             inner: Mutex::new(Inner {
@@ -107,12 +119,19 @@ impl Worker {
                     phase: "runtime".into(),
                     elapsed_ms: 0,
                     timeout_seconds: 120,
+                    resources: resources::Usage::default(),
+                    execution_limits: None,
+                    resource_settings,
+                    resource_settings_invalid,
+                    resource_monitor_supported: resources::supported(),
+                    runtime: crate::runtime::current().info,
                     error: None,
                     report,
                     can_analyze: source_path.is_some(),
                     operation: "analysis".into(),
                     last_export: None,
                     comparison: None,
+                    outcome_report: None,
                     source_linked: false,
                     project_key: folder
                         .file_name()
@@ -160,6 +179,7 @@ impl Worker {
         let mut snapshot = inner.snapshot.clone();
         snapshot.source_linked = inner.source_path.as_ref().is_some_and(|p| p.is_file());
         snapshot.can_analyze = snapshot.source_linked;
+        snapshot.runtime = crate::runtime::current().info;
         snapshot.source_name = inner
             .source_path
             .as_ref()
@@ -169,6 +189,36 @@ impl Worker {
             snapshot.elapsed_ms = inner.started.map_or(0, |s| s.elapsed().as_millis() as u64);
         }
         snapshot
+    }
+    pub fn set_limits(
+        &self,
+        limits: resources::Limits,
+        expected_revision: u64,
+    ) -> Result<(), String> {
+        limits.validate()?;
+        let mut inner = self.inner.lock().unwrap();
+        if active(&inner.snapshot.status) {
+            return Err("worker_busy".into());
+        }
+        if inner.snapshot.resource_settings.revision != expected_revision {
+            return Err("resource_settings_changed".into());
+        }
+        let settings = resources::Settings {
+            version: 1,
+            revision: expected_revision
+                .checked_add(1)
+                .ok_or("resource_settings_changed")?,
+            limits,
+        };
+        resources::save(self.folder(), &settings)?;
+        inner.snapshot.resource_settings = settings;
+        inner.snapshot.resource_settings_invalid = false;
+        Ok(())
+    }
+    pub fn reserve_outcome(&self, timeout_seconds: u64) -> Result<(), String> {
+        self.reserve(timeout_seconds)?;
+        self.inner.lock().unwrap().snapshot.operation = "inspect_outcome".into();
+        Ok(())
     }
     pub fn reserve(&self, timeout_seconds: u64) -> Result<(), String> {
         if !(1..=3600).contains(&timeout_seconds) {
@@ -184,6 +234,8 @@ impl Worker {
         inner.snapshot.percent = 0;
         inner.snapshot.phase = "runtime".into();
         inner.snapshot.elapsed_ms = 0;
+        inner.snapshot.resources = resources::Usage::default();
+        inner.snapshot.execution_limits = Some(inner.snapshot.resource_settings.limits.clone());
         inner.snapshot.error = None;
         inner.snapshot.timeout_seconds = timeout_seconds;
         inner.started = None;
@@ -459,6 +511,40 @@ impl Worker {
         );
     }
 
+    pub fn run_outcome(
+        &self,
+        context: causalmed_core::evaluation::EvaluationContext,
+        inputs: Value,
+    ) {
+        self.inner.lock().unwrap().snapshot.operation = "inspect_outcome".into();
+        let job = serde_json::json!({"operation":"inspect_outcome", "contextSha256":causalmed_core::evaluation::context_sha(&context), "context":context, "inputs":inputs});
+        let command = worker_command(
+            &python_path(),
+            worker_script(),
+            Path::new(""),
+            &serde_json::json!({}),
+            "",
+            &job,
+        );
+        self.run_command_from(command, RunOutput::Outcome { context });
+    }
+    pub fn run_cohort_export(
+        &self,
+        python: &Path,
+        script: &str,
+        source: ExportSource,
+        destination: &Path,
+        definition: Value,
+    ) {
+        self.run_export_inner(
+            python,
+            script,
+            source,
+            destination,
+            "export_cohort",
+            Some(definition),
+        );
+    }
     pub fn run_export(
         &self,
         python: &Path,
@@ -467,12 +553,27 @@ impl Worker {
         destination: &Path,
         kind: &str,
     ) {
+        self.run_export_inner(python, script, source, destination, kind, None);
+    }
+    fn run_export_inner(
+        &self,
+        python: &Path,
+        script: &str,
+        source: ExportSource,
+        destination: &Path,
+        kind: &str,
+        definition: Option<Value>,
+    ) {
         {
             let mut inner = self.inner.lock().unwrap();
             inner.snapshot.operation = kind.into();
         }
-        let extension = if kind == "export_h5ad" { "h5ad" } else { "zip" };
-        if !["export_h5ad", "export_qc"].contains(&kind)
+        let extension = if ["export_h5ad", "export_cohort"].contains(&kind) {
+            "h5ad"
+        } else {
+            "zip"
+        };
+        if !["export_h5ad", "export_qc", "export_cohort"].contains(&kind)
             || destination.extension().and_then(|s| s.to_str()) != Some(extension)
         {
             self.finish("failed", Some("invalid_export"));
@@ -493,7 +594,7 @@ impl Worker {
                 return;
             }
         };
-        let job = serde_json::json!({"operation": kind, "selectionDir": source.directory, "selection": source.selection, "output": staged.path()});
+        let job = serde_json::json!({"operation": kind, "selectionDir": source.directory, "selection": source.selection, "output": staged.path(), "definition":definition});
         let command = worker_command(
             python,
             script,
@@ -530,6 +631,20 @@ impl Worker {
                 finish(&mut inner, "cancelled", None);
                 return;
             }
+            if let Err(code) =
+                resources::configure(&mut command, &inner.snapshot.resource_settings.limits)
+            {
+                finish(&mut inner, "failed", Some(&code));
+                return;
+            }
+            if command.get_program() == std::ffi::OsStr::new(crate::runtime::UNAVAILABLE) {
+                let code = crate::runtime::current()
+                    .info
+                    .error
+                    .unwrap_or_else(|| "bundled_runtime_missing".into());
+                finish(&mut inner, "failed", Some(&code));
+                return;
+            }
             inner.started = Some(Instant::now());
             match command.spawn() {
                 Ok(mut child) => {
@@ -538,8 +653,13 @@ impl Worker {
                     inner.snapshot.status = "running".into();
                     pipes
                 }
-                Err(_) => {
-                    finish(&mut inner, "failed", Some("python_unavailable"));
+                Err(error) => {
+                    let code = if matches!(error.raw_os_error(), Some(libc::EPERM | libc::EINVAL)) {
+                        "resource_setup_failed"
+                    } else {
+                        "python_unavailable"
+                    };
+                    finish(&mut inner, "failed", Some(code));
                     return;
                 }
             }
@@ -586,6 +706,8 @@ impl Worker {
         let mut report = None;
         let mut failure = None;
         let mut exited = None;
+        let mut last_sample = Instant::now() - Duration::from_secs(1);
+        let mut monitor_failures = 0;
         loop {
             let message = rx.recv_timeout(Duration::from_millis(25));
             let mut inner = self.inner.lock().unwrap();
@@ -600,6 +722,40 @@ impl Worker {
                 stop_child(&mut inner);
                 finish(&mut inner, "timed_out", None);
                 break;
+            }
+            if exited.is_none() && last_sample.elapsed() >= Duration::from_millis(50) {
+                last_sample = Instant::now();
+                let child = inner.child.as_mut().unwrap();
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::process::ExitStatusExt;
+                            if status.signal() == Some(libc::SIGXCPU) {
+                                failure = Some("worker_cpu_limit".into());
+                            }
+                        }
+                        exited = Some(status.success());
+                    }
+                    Ok(None) => match resources::sample(child.id()) {
+                        Ok(sample) => {
+                            monitor_failures = 0;
+                            inner.snapshot.resources.observe(sample);
+                        }
+                        Err(_) => monitor_failures += 1,
+                    },
+                    Err(_) => failure = Some("worker_failed".into()),
+                }
+                if monitor_failures >= 3 {
+                    failure = Some("resource_monitor_failed".into());
+                }
+                if let Some(code) = inner
+                    .snapshot
+                    .resources
+                    .exceeded(&inner.snapshot.resource_settings.limits)
+                {
+                    failure = Some(code.into());
+                }
             }
             let disconnected = matches!(&message, Err(mpsc::RecvTimeoutError::Disconnected));
             if let Ok(message) = message {
@@ -673,7 +829,16 @@ impl Worker {
             }
             if exited.is_none() {
                 match inner.child.as_mut().unwrap().try_wait() {
-                    Ok(Some(status)) => exited = Some(status.success()),
+                    Ok(Some(status)) => {
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::process::ExitStatusExt;
+                            if status.signal() == Some(libc::SIGXCPU) {
+                                failure = Some("worker_cpu_limit".into());
+                            }
+                        }
+                        exited = Some(status.success());
+                    }
                     Ok(None) => {}
                     Err(_) => {
                         stop_child(&mut inner);
@@ -681,6 +846,11 @@ impl Worker {
                         break;
                     }
                 }
+            }
+            if let Some(code) = failure.as_deref() {
+                stop_child(&mut inner);
+                finish(&mut inner, "failed", Some(code));
+                break;
             }
             // EOF ensures the final result has been consumed, even after process exit.
             if disconnected && exited.is_some() {
@@ -690,6 +860,22 @@ impl Worker {
                 } else {
                     let report = report.take().unwrap();
                     match output {
+                        RunOutput::Outcome { context } => {
+                            let valid = serde_json::from_value::<
+                                causalmed_core::evaluation::OutcomeResult,
+                            >(report.clone())
+                            .ok()
+                            .is_some_and(|r| {
+                                causalmed_core::evaluation::validate_outcome(&context, &r).is_ok()
+                            });
+                            if valid {
+                                inner.snapshot.outcome_report = Some(report);
+                                inner.snapshot.percent = 100;
+                                finish(&mut inner, "completed", None);
+                            } else {
+                                finish(&mut inner, "failed", Some("worker_protocol_error"));
+                            }
+                        }
                         RunOutput::Relink { source, sha256 } => {
                             if report["sha256"] != sha256 {
                                 finish(&mut inner, "failed", Some("worker_protocol_error"));
@@ -893,7 +1079,13 @@ fn worker_command(
 ) -> Command {
     let mut command = Command::new(python);
     command
-        .args(["-u", "-c", script])
+        .args(["-I", "-B", "-u", "-c", script])
+        .env_remove("PYTHONPATH")
+        .env_remove("PYTHONHOME")
+        .env_remove("VIRTUAL_ENV")
+        .env_remove("PYTHONUSERBASE")
+        .env_remove("PYTHONEXECUTABLE")
+        .env_remove("__PYVENV_LAUNCHER__")
         .arg(path)
         .arg(options.to_string())
         .arg(sha)
@@ -942,22 +1134,17 @@ pub fn worker_script() -> &'static str {
     concat!(
         include_str!("../../python/causalmed_worker/qc.py"),
         "\n",
+        include_str!("../../python/causalmed_worker/stream_export.py"),
+        "\n",
         include_str!("../../python/causalmed_worker/selection.py"),
+        "\n",
+        include_str!("../../python/causalmed_worker/outcome.py"),
         "\n",
         include_str!("../../python/causalmed_worker/h5ad.py")
     )
 }
 pub fn python_path() -> PathBuf {
-    if let Some(path) = std::env::var_os("CAUSALMED_PYTHON") {
-        return path.into();
-    }
-    // Development convenience; distributable workers will be separately packaged.
-    let local = Path::new(env!("CARGO_MANIFEST_DIR")).join("../.venv/bin/python");
-    if local.exists() {
-        local
-    } else {
-        PathBuf::from("python3")
-    }
+    crate::runtime::current().python
 }
 
 #[cfg(test)]
@@ -966,7 +1153,7 @@ mod tests {
     fn command(code: &str) -> Command {
         let mut command = Command::new(python_path());
         command
-            .args(["-u", "-c", code])
+            .args(["-I", "-B", "-u", "-c", code])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -1296,5 +1483,285 @@ mod tests {
             worker.snapshot().error.as_deref(),
             Some("python_unavailable")
         );
+    }
+    #[test]
+    fn outcome_timeout_cancel_and_malformed_preserve_previous_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = Worker::new(dir.path());
+        let ctx = causalmed_core::evaluation::EvaluationContext {
+            version: 1,
+            spec: causalmed_core::evaluation::OutcomeSpec {
+                feature_id: "QA".into(),
+                feature_column: "_index".into(),
+            },
+            inputs: vec![],
+        };
+        w.inner.lock().unwrap().snapshot.report = Some(serde_json::json!({"previous":"QC"}));
+        w.inner.lock().unwrap().snapshot.outcome_report =
+            Some(serde_json::json!({"previous":"outcome"}));
+        w.reserve(1).unwrap();
+        w.run_command_from(
+            command("import time; time.sleep(60)"),
+            RunOutput::Outcome {
+                context: ctx.clone(),
+            },
+        );
+        assert_eq!(w.snapshot().status, "timed_out");
+        w.reserve(10).unwrap();
+        std::thread::scope(|scope| {
+            scope.spawn(||w.run_command_from(command("import json,time;print(json.dumps({'type':'progress','percent':10,'phase':'expression'}),flush=True);time.sleep(60)"),RunOutput::Outcome{context:ctx.clone()}));
+            for _ in 0..100 {
+                if w.snapshot().percent == 10 {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            w.cancel();
+        });
+        assert_eq!(w.snapshot().status, "cancelled");
+        w.reserve(10).unwrap();
+        w.run_command_from(
+            command("import json;print(json.dumps({'type':'result','report':{}}))"),
+            RunOutput::Outcome { context: ctx },
+        );
+        assert_eq!(w.snapshot().status, "failed");
+        assert_eq!(
+            w.snapshot().report,
+            Some(serde_json::json!({"previous":"QC"}))
+        );
+        assert_eq!(
+            w.snapshot().outcome_report,
+            Some(serde_json::json!({"previous":"outcome"}))
+        );
+        assert!(w.inner.lock().unwrap().child.is_none());
+    }
+    #[test]
+    fn resource_budgets_reap_child_preserve_report_and_prevent_publication() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = Worker::new(dir.path());
+        w.inner.lock().unwrap().snapshot.report = Some(serde_json::json!({"previous":"QC"}));
+        w.set_limits(
+            resources::Limits {
+                memory_mib: 128,
+                cpu_seconds: 1,
+                threads: 1,
+            },
+            0,
+        )
+        .unwrap();
+        assert!(w.set_limits(resources::Limits::default(), 0).is_err());
+        w.reserve(12).unwrap();
+        assert!(w.set_limits(resources::Limits::default(), 1).is_err());
+        w.run_command(command("while True: pass"));
+        assert_eq!(w.snapshot().error.as_deref(), Some("worker_cpu_limit"));
+        assert!(w.snapshot().resources.cpu_millis >= 1000);
+        assert!(w.inner.lock().unwrap().child.is_none());
+        let destination = dir.path().join("must-not-publish.zip");
+        let staged = NamedTempFile::new_in(dir.path()).unwrap();
+        let staged_path = staged.path().to_owned();
+        w.reserve(12).unwrap();
+        w.run_command_from(
+            command("import time; x=bytearray(256*1024*1024); time.sleep(5)"),
+            RunOutput::Export {
+                destination: destination.clone(),
+                staged,
+                selection_id: "QA".into(),
+                kind: "export_qc".into(),
+            },
+        );
+        assert_eq!(w.snapshot().error.as_deref(), Some("worker_memory_limit"));
+        assert!(!destination.exists());
+        assert!(!staged_path.exists());
+        assert!(w.inner.lock().unwrap().child.is_none());
+        assert_eq!(
+            w.snapshot().report,
+            Some(serde_json::json!({"previous":"QC"}))
+        );
+        assert_eq!(
+            Worker::new(dir.path())
+                .snapshot()
+                .resource_settings
+                .limits
+                .memory_mib,
+            128
+        );
+        w.set_limits(resources::Limits::default(), 1).unwrap();
+        w.reserve(12).unwrap();
+        w.run_command(command(&success()));
+        assert_eq!(w.snapshot().status, "completed");
+    }
+    #[test]
+    fn worker_thread_environment_is_applied_before_imports() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = Worker::new(dir.path());
+        w.set_limits(
+            resources::Limits {
+                memory_mib: 256,
+                cpu_seconds: 30,
+                threads: 1,
+            },
+            0,
+        )
+        .unwrap();
+        w.reserve(12).unwrap();
+        w.run_command(command(&format!("import os;assert all(os.environ[k]=='1' for k in ['OMP_NUM_THREADS','OPENBLAS_NUM_THREADS','MKL_NUM_THREADS','NUMEXPR_NUM_THREADS','VECLIB_MAXIMUM_THREADS','BLIS_NUM_THREADS']);{}",success())));
+        assert_eq!(w.snapshot().status, "completed");
+    }
+    #[test]
+    #[ignore = "requires CAUSALMED_TEST_DONOR_H5AD and anndata"]
+    fn public_h5ad_resource_stop_retry_restore_and_isolation() {
+        let root = tempfile::tempdir().unwrap();
+        let a = crate::project::create(root.path(), "Budget A QA", 0).unwrap();
+        let b = crate::project::create(root.path(), "Budget B QA", 0).unwrap();
+        let source = PathBuf::from(std::env::var("CAUSALMED_TEST_DONOR_H5AD").unwrap());
+        let original_sha = crate::project::digest(&source).unwrap();
+        let w = Worker::new(a.path());
+        w.set_limits(
+            resources::Limits {
+                memory_mib: 1024,
+                cpu_seconds: 60,
+                threads: 1,
+            },
+            0,
+        )
+        .unwrap();
+        w.reserve(120).unwrap();
+        w.run_analysis(
+            &python_path(),
+            worker_script(),
+            &source,
+            &serde_json::json!({"donorColumn":"replicate"}),
+            "",
+        );
+        assert_eq!(w.snapshot().status, "completed", "{:?}", w.snapshot().error);
+        let report = w.snapshot().report.unwrap();
+        let selection = report["selection"]["id"].as_str().unwrap();
+        assert_eq!(report["qc"]["retained"], 24562);
+        assert!(w.snapshot().resources.samples > 0);
+        assert!(w.snapshot().resources.peak_resident_bytes > 0);
+        eprintln!(
+            "Kang resource success: peak={} MiB cpu={} ms samples={}",
+            w.snapshot().resources.peak_resident_bytes / 1048576,
+            w.snapshot().resources.cpu_millis,
+            w.snapshot().resources.samples
+        );
+        w.set_limits(
+            resources::Limits {
+                memory_mib: 64,
+                cpu_seconds: 60,
+                threads: 1,
+            },
+            1,
+        )
+        .unwrap();
+        w.reserve(120).unwrap();
+        w.run_analysis(
+            &python_path(),
+            worker_script(),
+            &source,
+            &serde_json::json!({"donorColumn":"replicate"}),
+            &original_sha,
+        );
+        assert_eq!(w.snapshot().error.as_deref(), Some("worker_memory_limit"));
+        assert_eq!(w.snapshot().report, Some(report.clone()));
+        assert_eq!(
+            std::fs::read_dir(a.path().join("qc-runs")).unwrap().count(),
+            1
+        );
+        assert!(w.inner.lock().unwrap().child.is_none());
+        let output = root.path().join("blocked.h5ad");
+        let input = w.export_source(selection).unwrap();
+        w.reserve(120).unwrap();
+        w.run_export(
+            &python_path(),
+            worker_script(),
+            input,
+            &output,
+            "export_h5ad",
+        );
+        assert_eq!(w.snapshot().error.as_deref(), Some("worker_memory_limit"));
+        assert!(!output.exists());
+        let restored = Worker::new(a.path());
+        assert_eq!(restored.snapshot().resource_settings.limits.memory_mib, 64);
+        assert_eq!(restored.snapshot().report, Some(report.clone()));
+        assert_eq!(
+            Worker::new(b.path())
+                .snapshot()
+                .resource_settings
+                .limits
+                .memory_mib,
+            2048
+        );
+        restored
+            .set_limits(
+                resources::Limits {
+                    memory_mib: 1024,
+                    cpu_seconds: 60,
+                    threads: 1,
+                },
+                2,
+            )
+            .unwrap();
+        let input = restored.export_source(selection).unwrap();
+        restored.reserve(120).unwrap();
+        restored.run_export(
+            &python_path(),
+            worker_script(),
+            input,
+            &output,
+            "export_h5ad",
+        );
+        assert_eq!(
+            restored.snapshot().status,
+            "completed",
+            "{:?}",
+            restored.snapshot().error
+        );
+        assert!(output.is_file());
+        let readback=Command::new(python_path()).args(["-I","-B","-c","import anndata as ad,sys; a=ad.read_h5ad(sys.argv[1],backed='r'); assert a.shape==(24562,15706); assert a.obs['replicate'].nunique()==8; a.file.close()"]).arg(&output).output().unwrap();
+        assert!(
+            readback.status.success(),
+            "{}",
+            String::from_utf8_lossy(&readback.stderr)
+        );
+        assert_eq!(restored.snapshot().report, Some(report.clone()));
+        assert_eq!(crate::project::digest(&source).unwrap(), original_sha);
+        // Local machine budgets are not portable research metadata.
+        let doc = causalmed_core::ResearchStore::open(a.path().join("research.sqlite3"))
+            .unwrap()
+            .snapshot();
+        let stage = crate::project::stage_save(a.path(), &doc, &restored).unwrap();
+        let package = root.path().join("budgets.causalmed");
+        crate::project::save(stage.path(), &package).unwrap();
+        let un = crate::project::unpack(&package, root.path()).unwrap();
+        crate::project::validate(un.path()).unwrap();
+        assert_eq!(
+            Worker::new(un.path())
+                .snapshot()
+                .resource_settings
+                .limits
+                .memory_mib,
+            2048
+        );
+    }
+    #[test]
+    fn outcome_reservation_exposes_operation_and_cancels_before_spawn() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = Worker::new(dir.path());
+        w.reserve_outcome(10).unwrap();
+        assert_eq!(w.snapshot().operation, "inspect_outcome");
+        w.cancel();
+        let ctx = causalmed_core::evaluation::EvaluationContext {
+            version: 1,
+            spec: causalmed_core::evaluation::OutcomeSpec {
+                feature_id: "QA".into(),
+                feature_column: "_index".into(),
+            },
+            inputs: vec![],
+        };
+        w.run_outcome(ctx, serde_json::json!([]));
+        assert_eq!(w.snapshot().status, "cancelled");
+        assert!(w.inner.lock().unwrap().child.is_none());
+        assert!(w.snapshot().outcome_report.is_none());
     }
 }

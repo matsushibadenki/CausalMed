@@ -1,4 +1,9 @@
 pub mod benchmark;
+pub mod cohorts;
+pub mod datasets;
+pub mod definitions;
+pub mod evaluation;
+pub use datasets::*;
 pub mod model;
 pub use model::*;
 use rusqlite::{params, Connection};
@@ -123,6 +128,10 @@ impl ResearchStore {
         if document.schema_version != 1 {
             return Err(invalid("unsupported_schema"));
         }
+        datasets::validate_registry(&document.datasets)?;
+        cohorts::validate_cohorts(&document)?;
+        definitions::validate(&document)?;
+        evaluation::validate(&document)?;
         Ok(document)
     }
     pub fn rename_project(&mut self, name: &str) -> Result<Document> {
@@ -151,6 +160,10 @@ impl ResearchStore {
         if document.schema_version != 1 {
             return Err(invalid("unsupported_schema"));
         }
+        datasets::validate_registry(&document.datasets)?;
+        cohorts::validate_cohorts(&document)?;
+        definitions::validate(&document)?;
+        evaluation::validate(&document)?;
         let mut store = Self {
             connection,
             document,
@@ -178,6 +191,10 @@ impl ResearchStore {
         {
             return Err(invalid("invalid_project"));
         }
+        datasets::validate_registry(&document.datasets)?;
+        cohorts::validate_cohorts(&document)?;
+        definitions::validate(&document)?;
+        evaluation::validate(&document)?;
         let mut empty = Document::default();
         empty.sources.clear();
         empty.edges.clear();

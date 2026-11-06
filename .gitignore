@@ -10,3 +10,6 @@ test-results/
 *.tsbuildinfo
 src-tauri/gen/
 
+
+src-tauri/python-worker/
+.worker-cache/

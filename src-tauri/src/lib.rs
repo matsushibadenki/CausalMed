@@ -1,6 +1,12 @@
 mod browse;
+mod cohorts;
+mod datasets;
+mod definitions;
+mod evaluation;
 mod h5ad;
 mod project;
+mod resources;
+mod runtime;
 mod search_index;
 mod trash;
 use causalmed_core::{Dock, Document, HypothesisStatus, Locale, NewHypothesis, ResearchStore};
@@ -98,11 +104,13 @@ async fn set_trash(
         if ["selecting", "running", "cancelling"].contains(&snapshot.status.as_str()) {
             return Err("worker_busy".into());
         }
-        match kind.as_str() {
+        let result = match kind.as_str() {
             "history" => trash::history(&worker, &project_key, &id, restore),
             "project" => trash::project(&state.root, &id, restore),
             _ => Err("trash_unavailable".into()),
-        }
+        };
+        let _ = app.emit("history-changed", &project_key);
+        result
     })
     .await
     .map_err(|_| "storage_error")?
@@ -118,14 +126,429 @@ async fn set_trash_batch(
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let _gate = state.project_gate.try_write().map_err(|_| "project_busy")?;
-        trash::batch(
+        let result = trash::batch(
             &state.root,
             &state.worker(),
             &project_key,
             &kind,
             &ids,
             restore,
-        )
+        );
+        let _ = app.emit("history-changed", &project_key);
+        result
+    })
+    .await
+    .map_err(|_| "storage_error")?
+}
+#[tauri::command]
+fn register_dataset(
+    app: tauri::AppHandle,
+    state: State<AppState>,
+    project_key: String,
+    sha256: String,
+) -> Reply {
+    let _gate = state.project_gate.try_read().map_err(|_| "project_busy")?;
+    let doc = datasets::register(
+        &mut *state.store.lock().map_err(|_| "state_unavailable")?,
+        &state.worker(),
+        &project_key,
+        &sha256,
+    )?;
+    let _ = app.emit("document-changed", doc.revision);
+    Ok(doc)
+}
+#[tauri::command]
+fn update_dataset(
+    app: tauri::AppHandle,
+    state: State<AppState>,
+    project_key: String,
+    sha256: String,
+    metadata: causalmed_core::DatasetMetadata,
+    expected_revision: u64,
+) -> Reply {
+    let _gate = state.project_gate.try_read().map_err(|_| "project_busy")?;
+    if state.worker().snapshot().project_key != project_key {
+        return Err("project_changed".into());
+    }
+    let doc = state
+        .store
+        .lock()
+        .map_err(|_| "state_unavailable")?
+        .update_dataset(&sha256, metadata, expected_revision)
+        .map_err(|e| e.to_string())?;
+    let _ = app.emit("document-changed", doc.revision);
+    Ok(doc)
+}
+#[tauri::command]
+fn set_evaluation_plan(
+    app: tauri::AppHandle,
+    state: State<AppState>,
+    project_key: String,
+    spec: causalmed_core::evaluation::OutcomeSpec,
+    evidence: String,
+    reviewed: bool,
+    expected_revision: u64,
+) -> Reply {
+    let _gate = state.project_gate.try_write().map_err(|_| "project_busy")?;
+    if state.worker().snapshot().project_key != project_key {
+        return Err("project_changed".into());
+    }
+    let doc = state
+        .store
+        .lock()
+        .map_err(|_| "state_unavailable")?
+        .set_evaluation_plan(spec, evidence, reviewed, expected_revision)
+        .map_err(|e| e.to_string())?;
+    let _ = app.emit("document-changed", doc.revision);
+    Ok(doc)
+}
+#[tauri::command]
+fn evaluation_context_sha(state: State<AppState>, project_key: String) -> Result<String, String> {
+    let _gate = state.project_gate.try_read().map_err(|_| "project_busy")?;
+    if state.worker().snapshot().project_key != project_key {
+        return Err("project_changed".into());
+    }
+    let doc = state
+        .store
+        .lock()
+        .map_err(|_| "state_unavailable")?
+        .snapshot();
+    causalmed_core::evaluation::context(&doc)
+        .map(|c| causalmed_core::evaluation::context_sha(&c))
+        .map_err(|e| e.to_string())
+}
+#[tauri::command]
+async fn inspect_real_outcome(
+    app: tauri::AppHandle,
+    project_key: String,
+    expected_revision: u64,
+    timeout_seconds: u64,
+) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let _gate = state.project_gate.try_read().map_err(|_| "project_busy")?;
+    let worker = state.worker();
+    if worker.snapshot().project_key != project_key {
+        return Err("project_changed".into());
+    }
+    let doc = state
+        .store
+        .lock()
+        .map_err(|_| "state_unavailable")?
+        .snapshot();
+    if doc.revision != expected_revision {
+        return Err("dataset_changed".into());
+    }
+    let (ctx, jobs) = evaluation::jobs(&doc, &worker)?;
+    worker.reserve_outcome(timeout_seconds)?;
+    drop(_gate);
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let Ok(_gate) = state.project_gate.write() else {
+            worker.finish("failed", Some("project_busy"));
+            return;
+        };
+        if state.worker().snapshot().project_key != project_key {
+            worker.finish("failed", Some("project_changed"));
+            return;
+        }
+        worker.run_outcome(ctx.clone(), jobs);
+        if worker.snapshot().status == "completed" {
+            let result = (|| -> Reply {
+                let out = serde_json::from_value(
+                    worker
+                        .snapshot()
+                        .outcome_report
+                        .ok_or("invalid_outcome_result")?,
+                )
+                .map_err(|_| "invalid_outcome_result")?;
+                state
+                    .store
+                    .lock()
+                    .map_err(|_| "state_unavailable")?
+                    .record_outcome(ctx, out)
+                    .map_err(|e| e.to_string())
+            })();
+            match result {
+                Ok(d) => {
+                    drop(_gate);
+                    let _ = app.emit("document-changed", d.revision);
+                }
+                Err(e) => worker.finish("failed", Some(&e)),
+            }
+        }
+    });
+    Ok(())
+}
+#[tauri::command]
+async fn run_real_baseline(
+    app: tauri::AppHandle,
+    project_key: String,
+    expected_revision: u64,
+) -> Reply {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let _gate = state.project_gate.try_write().map_err(|_| "project_busy")?;
+        let worker = state.worker();
+        if worker.snapshot().project_key != project_key {
+            return Err("project_changed".into());
+        }
+        let doc = state
+            .store
+            .lock()
+            .map_err(|_| "state_unavailable")?
+            .snapshot();
+        if doc.revision != expected_revision {
+            return Err("dataset_changed".into());
+        }
+        let eligibility = cohorts::assess(&doc, &worker, &project_key)?;
+        let d = state
+            .store
+            .lock()
+            .map_err(|_| "state_unavailable")?
+            .run_real_baseline(eligibility)
+            .map_err(|e| e.to_string())?;
+        let _ = app.emit("document-changed", d.revision);
+        Ok(d)
+    })
+    .await
+    .map_err(|_| "worker_failed".to_string())?
+}
+#[tauri::command]
+fn create_cohort_definition(
+    app: tauri::AppHandle,
+    state: State<AppState>,
+    project_key: String,
+    name: String,
+    condition_value: String,
+    perturbation_value: String,
+    expected_revision: u64,
+) -> Reply {
+    let _gate = state.project_gate.try_read().map_err(|_| "project_busy")?;
+    let doc = definitions::create(
+        &mut *state.store.lock().map_err(|_| "state_unavailable")?,
+        &state.worker(),
+        &project_key,
+        name,
+        condition_value,
+        perturbation_value,
+        expected_revision,
+    )?;
+    let _ = app.emit("document-changed", doc.revision);
+    Ok(doc)
+}
+#[tauri::command]
+fn rename_cohort_definition(
+    app: tauri::AppHandle,
+    state: State<AppState>,
+    project_key: String,
+    id: String,
+    name: String,
+    expected_revision: u64,
+) -> Reply {
+    let _gate = state.project_gate.try_read().map_err(|_| "project_busy")?;
+    if state.worker().snapshot().project_key != project_key {
+        return Err("project_changed".into());
+    }
+    if ["selecting", "running", "cancelling"].contains(&state.worker().snapshot().status.as_str()) {
+        return Err("worker_busy".into());
+    }
+    let doc = state
+        .store
+        .lock()
+        .map_err(|_| "state_unavailable")?
+        .rename_cohort_definition(&id, name, expected_revision)
+        .map_err(|e| e.to_string())?;
+    let _ = app.emit("document-changed", doc.revision);
+    Ok(doc)
+}
+#[tauri::command]
+fn adopt_cohort_export(
+    app: tauri::AppHandle,
+    state: State<AppState>,
+    project_key: String,
+    id: String,
+    expected_revision: u64,
+) -> Reply {
+    let _gate = state.project_gate.try_read().map_err(|_| "project_busy")?;
+    let doc = definitions::adopt(
+        &mut *state.store.lock().map_err(|_| "state_unavailable")?,
+        &state.worker(),
+        &project_key,
+        &id,
+        expected_revision,
+    )?;
+    let _ = app.emit("document-changed", doc.revision);
+    Ok(doc)
+}
+#[tauri::command]
+async fn export_cohort_definition(
+    app: tauri::AppHandle,
+    project_key: String,
+    id: String,
+    timeout_seconds: u64,
+) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let _gate = state.project_gate.try_read().map_err(|_| "project_busy")?;
+    let worker = state.worker();
+    if worker.snapshot().project_key != project_key {
+        return Err("project_changed".into());
+    }
+    let doc = state
+        .store
+        .lock()
+        .map_err(|_| "state_unavailable")?
+        .snapshot();
+    let def = definitions::definition(&doc, &id)?.clone();
+    let source = worker.export_source(&def.payload.alignment.observation.qc_id)?;
+    worker.reserve(timeout_seconds)?;
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(file) = app
+            .dialog()
+            .file()
+            .add_filter("H5AD", &["h5ad"])
+            .set_file_name("causalmed-cohort.h5ad")
+            .blocking_save_file()
+        else {
+            worker.finish("cancelled", None);
+            return;
+        };
+        let Ok(path) = file.into_path() else {
+            worker.finish("failed", Some("invalid_export"));
+            return;
+        };
+        let state = app.state::<AppState>();
+        let Ok(_export_gate) = state.project_gate.try_write() else {
+            worker.finish("failed", Some("project_busy"));
+            return;
+        };
+        if state.worker().snapshot().project_key != project_key {
+            worker.finish("failed", Some("project_changed"));
+            return;
+        }
+        worker.run_cohort_export(
+            &h5ad::python_path(),
+            h5ad::worker_script(),
+            source,
+            &path,
+            definitions::job(&def),
+        );
+        if worker.snapshot().status == "completed" {
+            let state = app.state::<AppState>();
+            let result = (|| {
+                let mut store = state.store.lock().map_err(|_| "state_unavailable")?;
+                if state.worker().snapshot().project_key != project_key {
+                    return Err("project_changed".to_owned());
+                }
+                definitions::record(&mut store, &worker, &project_key, &id)
+            })();
+            match result {
+                Ok(doc) => {
+                    let _ = app.emit("document-changed", doc.revision);
+                }
+                Err(code) => worker.finish("failed", Some(&code)),
+            }
+        }
+    });
+    Ok(())
+}
+#[tauri::command]
+fn capture_cohort(
+    app: tauri::AppHandle,
+    state: State<AppState>,
+    project_key: String,
+    sha256: String,
+    expected_revision: u64,
+) -> Reply {
+    let _gate = state.project_gate.try_read().map_err(|_| "project_busy")?;
+    let doc = cohorts::capture(
+        &mut *state.store.lock().map_err(|_| "state_unavailable")?,
+        &state.worker(),
+        &project_key,
+        &sha256,
+        expected_revision,
+    )?;
+    let _ = app.emit("document-changed", doc.revision);
+    Ok(doc)
+}
+#[tauri::command]
+fn update_cohort(
+    app: tauri::AppHandle,
+    state: State<AppState>,
+    project_key: String,
+    sha256: String,
+    settings: causalmed_core::cohorts::CohortSettings,
+    expected_revision: u64,
+) -> Reply {
+    let _gate = state.project_gate.try_read().map_err(|_| "project_busy")?;
+    if state.worker().snapshot().project_key != project_key {
+        return Err("project_changed".into());
+    }
+    let doc = state
+        .store
+        .lock()
+        .map_err(|_| "state_unavailable")?
+        .update_cohort(&sha256, settings, expected_revision)
+        .map_err(|e| e.to_string())?;
+    let _ = app.emit("document-changed", doc.revision);
+    Ok(doc)
+}
+#[tauri::command]
+async fn assess_eligibility(
+    app: tauri::AppHandle,
+    project_key: String,
+    expected_revision: u64,
+) -> Result<causalmed_core::cohorts::Eligibility, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let _gate = state.project_gate.try_write().map_err(|_| "project_busy")?;
+        let doc = state
+            .store
+            .lock()
+            .map_err(|_| "state_unavailable")?
+            .snapshot();
+        if doc.revision != expected_revision {
+            return Err("dataset_changed".into());
+        }
+        let result = cohorts::assess(&doc, &state.worker(), &project_key)?;
+        if state
+            .store
+            .lock()
+            .map_err(|_| "state_unavailable")?
+            .snapshot()
+            .revision
+            != doc.revision
+        {
+            return Err("dataset_changed".into());
+        }
+        Ok(result)
+    })
+    .await
+    .map_err(|_| "storage_error")?
+}
+#[tauri::command]
+async fn dataset_counts(
+    app: tauri::AppHandle,
+    project_key: String,
+) -> Result<std::collections::BTreeMap<String, [usize; 2]>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let _gate = state.project_gate.try_read().map_err(|_| "project_busy")?;
+        let worker = state.worker();
+        if worker.snapshot().project_key != project_key {
+            return Err("project_changed".into());
+        }
+        let hashes = state
+            .store
+            .lock()
+            .map_err(|_| "state_unavailable")?
+            .snapshot()
+            .datasets
+            .into_iter()
+            .map(|r| r.observation.sha256)
+            .collect::<Vec<_>>();
+        search_index::dataset_counts(&worker, &hashes)
     })
     .await
     .map_err(|_| "storage_error")?
@@ -668,6 +1091,20 @@ async fn compare_qc_history(
     Ok(())
 }
 #[tauri::command]
+fn set_worker_limits(
+    state: State<AppState>,
+    project_key: String,
+    limits: resources::Limits,
+    expected_revision: u64,
+) -> Result<(), String> {
+    let _gate = state.project_gate.try_read().map_err(|_| "project_busy")?;
+    let worker = state.worker();
+    if worker.snapshot().project_key != project_key {
+        return Err("project_changed".into());
+    }
+    worker.set_limits(limits, expected_revision)
+}
+#[tauri::command]
 fn get_h5ad_state(state: State<AppState>) -> h5ad::Snapshot {
     state.worker().snapshot()
 }
@@ -733,6 +1170,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_document,
             import_h5ad,
+            set_worker_limits,
             get_h5ad_state,
             get_qc_history,
             select_qc_history,
@@ -749,6 +1187,20 @@ pub fn run() {
             set_inspector_dock,
             open_graph,
             export_workspace,
+            register_dataset,
+            update_dataset,
+            dataset_counts,
+            capture_cohort,
+            set_evaluation_plan,
+            evaluation_context_sha,
+            inspect_real_outcome,
+            run_real_baseline,
+            create_cohort_definition,
+            rename_cohort_definition,
+            export_cohort_definition,
+            adopt_cohort_export,
+            update_cohort,
+            assess_eligibility,
             set_trash,
             set_trash_batch,
             query_projects,

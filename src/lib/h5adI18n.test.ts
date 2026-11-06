@@ -1,3 +1,8 @@
+import { resourceText } from './resourceI18n';
+import { evaluationText } from './evaluationI18n';
+import { definitionText } from './definitionI18n';
+import { cohortText } from './cohortI18n';
+import { datasetText } from './datasetI18n';
 import { bulkText } from './bulkI18n';
 import { trashText } from './trashI18n';
 import { browseText } from './browseI18n';
@@ -47,3 +52,13 @@ it('includes search/filter/sort/pagination labels in every locale',()=>{
 it('includes reversible trash actions and errors in every locale',()=>{for(const locale of Object.values(trashText)){expect(Object.keys(locale).sort()).toEqual(Object.keys(trashText.en).sort());for(const value of Object.values(locale))expect(value.length).toBeGreaterThan(0);}});
 
 it('includes bulk selection and outcomes in every locale',()=>{for(const locale of Object.values(bulkText)){expect(Object.keys(locale).sort()).toEqual(Object.keys(bulkText.en).sort());for(const value of Object.values(locale))expect(value.length).toBeGreaterThan(0);}});
+
+it('includes dataset provenance, roles and conflict errors in every locale',()=>{for(const locale of Object.values(datasetText)){expect(Object.keys(locale).sort()).toEqual(Object.keys(datasetText.en).sort());for(const value of Object.values(locale))expect(value.length).toBeGreaterThan(0);}});
+
+it('includes donor alignment, preflight blockers and errors in every locale',()=>{for(const locale of Object.values(cohortText)){expect(Object.keys(locale).sort()).toEqual(Object.keys(cohortText.en).sort());for(const value of Object.values(locale))expect(value.length).toBeGreaterThan(0);}});
+
+it('includes cohort definitions, export and adoption errors in every locale',()=>{for(const locale of Object.values(definitionText)){expect(Object.keys(locale).sort()).toEqual(Object.keys(definitionText.en).sort());for(const value of Object.values(locale))expect(value.length).toBeGreaterThan(0);}});
+
+it("translates real outcome inspection, review and abstention controls",()=>{for(const locale of Object.values(evaluationText)){expect(Object.keys(locale).sort()).toEqual(Object.keys(evaluationText.en).sort());for(const value of Object.values(locale))expect(value.length).toBeGreaterThan(0);}});
+
+it("translates worker budgets and monitoring failures in every locale",()=>{for(const locale of Object.values(resourceText)){expect(Object.keys(locale).sort()).toEqual(Object.keys(resourceText.en).sort());for(const value of Object.values(locale))expect(value.length).toBeGreaterThan(0);}});

@@ -12,9 +12,9 @@ import { trashText } from '../lib/trashI18n';
 import { historyText } from '../lib/historyI18n';
 import type { Locale } from '../lib/types';
 import { Info, IconButton } from './ui';
-export function QcHistory({locale,job,active}:{locale:Locale;job:H5adState;active:boolean}) {
+export function QcHistory({locale,job,active,sourceSha256=''}:{locale:Locale;job:H5adState;active:boolean;sourceSha256?:string}) {
  const t=historyText[locale],tt=trashText[locale];
- const list=usePagedList<HistoryRow>('query_qc_history',job.projectKey,`${job.id}:${job.status}:${job.report?.selection?.id}`);
+ const list=usePagedList<HistoryRow>('query_qc_history',job.projectKey,`${job.id}:${job.status}:${job.report?.selection?.id}`,sourceSha256);
  const bulk=useBulkSelection(`${job.projectKey}:history:${list.query.trash}`);
  const [outcome,setOutcome]=useState<{scope:string;result:BatchResult}|null>(null);
  const bx=bulkText[locale];

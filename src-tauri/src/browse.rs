@@ -12,6 +12,7 @@ pub struct Query {
     pub page: usize,
     pub page_size: usize,
     pub trash: bool,
+    pub source_sha256: String,
 }
 impl Default for Query {
     fn default() -> Self {
@@ -22,12 +23,19 @@ impl Default for Query {
             page: 1,
             page_size: 10,
             trash: false,
+            source_sha256: String::new(),
         }
     }
 }
 impl Query {
     fn validate(&self, filters: &[&str], sorts: &[&str]) -> Result<(), String> {
-        if self.search.len() > 512
+        if (!self.source_sha256.is_empty()
+            && (self.source_sha256.len() != 64
+                || !self
+                    .source_sha256
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))))
+            || self.search.len() > 512
             || self.search.contains('\0')
             || self.page == 0
             || !(1..=50).contains(&self.page_size)
@@ -219,6 +227,7 @@ mod tests {
             page: 999,
             page_size: 50,
             trash: false,
+            source_sha256: String::new(),
         };
         let p = history_rows(rows, "0002", "A", &q).unwrap();
         assert_eq!(p.total, 252);

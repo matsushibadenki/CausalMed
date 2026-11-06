@@ -372,6 +372,7 @@ pub fn validate(folder: &Path) -> Result<Document, String> {
     }
     let worker = Worker::new(folder);
     let ids = archive_ids(folder)?;
+    crate::cohorts::validate_archives(&doc, &worker)?;
     let states = history_states(folder, &ids)?;
     if let Ok(entries) = fs::read_dir(folder.join("qc-runs")) {
         for entry in entries {
@@ -938,11 +939,58 @@ mod tests {
         )
         .unwrap();
         assert_eq!(selected.items[0].id, id);
-        let doc = ResearchStore::in_memory().unwrap().snapshot();
+        let mut store = ResearchStore::open(root.path().join("research.sqlite3")).unwrap();
+        let registered = crate::datasets::register(
+            &mut store,
+            &worker,
+            &scope,
+            first["sha256"].as_str().unwrap(),
+        )
+        .unwrap();
+        let record = &registered.datasets[0];
+        assert!(record
+            .observation
+            .annotation_schema
+            .iter()
+            .any(|c| c.name == "replicate" && c.kind != "unknown"));
+        let mut metadata = record.metadata.clone();
+        metadata.donor_column = "replicate".into();
+        metadata.notes = "Public Kang source; provenance/license not yet reviewed".into();
+        let doc = store
+            .update_dataset(
+                first["sha256"].as_str().unwrap(),
+                metadata.clone(),
+                registered.revision,
+            )
+            .unwrap();
+        let counts = crate::search_index::dataset_counts(
+            &worker,
+            &[first["sha256"].as_str().unwrap().into(), "0".repeat(64)],
+        )
+        .unwrap();
+        assert_eq!(counts[first["sha256"].as_str().unwrap()], [2, 0]);
+        assert_eq!(
+            crate::browse::history(
+                &worker,
+                &scope,
+                &crate::browse::Query {
+                    source_sha256: "0".repeat(64),
+                    ..Default::default()
+                }
+            )
+            .unwrap()
+            .total,
+            0
+        );
+
         let stage = stage_save(root.path(), &doc, &worker).unwrap();
         let package = root.path().join("real.causalmed");
         save(stage.path(), &package).unwrap();
         let restored = unpack(&package, root.path()).unwrap();
+        let restored_doc = validate(restored.path()).unwrap();
+        assert_eq!(restored_doc.datasets.len(), 1);
+        assert_eq!(restored_doc.datasets[0].metadata, metadata);
+
         fs::copy(
             restored.path().join("selected.json"),
             restored.path().join("h5ad-metadata.json"),

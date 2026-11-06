@@ -45,6 +45,14 @@ class ExpressionQcTests(unittest.TestCase):
                 self.assertEqual({d['label']:d['retained'] for d in q['donor']['groups']},{'D1':1,'D2':0})
                 json.dumps(q,allow_nan=False)
 
+    def test_exact_donor_inventory_flags_truncation_and_cardinality(self):
+        for labels, complete in [(['D1','D2'], True), (['x'*201,'D2'], False), ([f'D{i}' for i in range(31)], False)]:
+            data=ad.AnnData(np.ones((len(labels),2)),obs=pd.DataFrame({'subject':labels},index=[f'c{i}' for i in range(len(labels))]))
+            report=quality_control(data,{'donorColumn':'subject','minGenes':0})
+            self.assertEqual(report['donor']['inventoryComplete'],complete)
+            if complete:
+                self.assertEqual(sum(d['retained'] for d in report['donor']['groups'])+report['donor']['missingRetained'],report['retained'])
+
     def test_noncanonical_sparse_entries_are_checked_before_duplicate_summing(self):
         for values, reason in (([1,-1,4], 'negative'),([0.5,0.5,4], 'fractional')):
             matrix=sparse.csr_matrix((np.array(values,dtype=float),np.array([0,0,1]),np.array([0,3])),shape=(1,4))

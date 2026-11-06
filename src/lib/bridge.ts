@@ -7,7 +7,7 @@ import type { ResearchDocument, Edge, Locale, Dock, NewHypothesis, HypothesisSta
 export const native = isTauri();
 const preview: ResearchDocument = {
   schemaVersion:1,revision:0,projectName:'IPF',sources:fixture.sources,edges:fixture.edges as Edge[],
-  imports:[],hypotheses:[],benchmarks:[],activity:[],
+  evaluationPlan:{spec:{featureId:"",featureColumn:"_index"},measurementEvidence:"",reviewedFor:null},evaluations:[],cohortDefinitions:[],cohorts:[],datasets:[],imports:[],hypotheses:[],benchmarks:[],activity:[],
   workspace:{ locale:'ja',selectedEdgeId:'E-001',inspectorDock:'right' },
 };
 let snapshot: { document: ResearchDocument | null; error: unknown } = { document:native ? null : preview, error:null };

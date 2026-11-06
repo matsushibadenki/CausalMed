@@ -9,7 +9,8 @@
     "preview": "vite preview --host 127.0.0.1",
     "tauri": "tauri",
     "test": "vitest run",
-    "check": "npm run build && npm test && cargo test -p causalmed-core"
+    "check": "npm run build && npm test && cargo test -p causalmed-core",
+    "bundle:worker": "python3 scripts/bundle_worker.py"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.10.0",

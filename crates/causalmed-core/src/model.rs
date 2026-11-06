@@ -134,6 +134,16 @@ pub struct Document {
     pub hypotheses: Vec<Hypothesis>,
     pub benchmarks: Vec<crate::benchmark::BenchmarkReport>,
     pub activity: Vec<Activity>,
+    #[serde(default)]
+    pub datasets: Vec<crate::datasets::DatasetRecord>,
+    #[serde(default)]
+    pub cohorts: Vec<crate::cohorts::CohortReview>,
+    #[serde(default)]
+    pub cohort_definitions: Vec<crate::definitions::CohortDefinition>,
+    #[serde(default)]
+    pub evaluation_plan: crate::evaluation::EvaluationPlan,
+    #[serde(default)]
+    pub evaluations: Vec<crate::evaluation::EvaluationRecord>,
     pub workspace: WorkspaceState,
 }
 
@@ -149,6 +159,11 @@ impl Default for Document {
             hypotheses: vec![],
             benchmarks: vec![],
             activity: vec![],
+            datasets: vec![],
+            cohorts: vec![],
+            cohort_definitions: vec![],
+            evaluation_plan: Default::default(),
+            evaluations: vec![],
             workspace: WorkspaceState {
                 locale: Locale::Ja,
                 selected_edge_id: None,

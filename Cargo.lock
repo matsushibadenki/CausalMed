@@ -320,6 +320,9 @@ version = "0.1.0"
 dependencies = [
  "causalmed-core",
  "causalmed-renderer",
+ "chrono",
+ "libc",
+ "mach2",
  "pollster",
  "rusqlite",
  "serde",
@@ -329,6 +332,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-dialog",
  "tempfile",
+ "uuid",
 ]
 
 [[package]]
@@ -342,6 +346,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror 2.0.21",
+ "url",
  "uuid",
 ]
 
@@ -2060,6 +2065,12 @@ name = "log"
 version = "0.4.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
+
+[[package]]
+name = "mach2"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dae608c151f68243f2b000364e1f7b186d9c29845f7d2d85bd31b9ad77ad552b"
 
 [[package]]
 name = "malloc_buf"

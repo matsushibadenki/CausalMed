@@ -63,7 +63,7 @@ def load_selection(directory, expected):
     return manifest, arrays
 
 
-def export_selection(source, directory, output, expected, kind, progress=lambda percent, phase: None):
+def export_selection(source, directory, output, expected, kind, progress=lambda percent, phase: None, definition=None):
     import numpy as np
     progress(2, 'selection')
     manifest, arrays = load_selection(directory, expected)
@@ -92,45 +92,44 @@ def export_selection(source, directory, output, expected, kind, progress=lambda 
                         if index % max(n // 20, 1) == 0:
                             progress(10 + int(index / n * 75), 'writing')
         provenance_key = ''
-    elif kind == 'export_h5ad':
-        import anndata
+    elif kind in ('export_h5ad', 'export_cohort'):
         progress(5, 'checksum')
         if not Path(source).is_file() or file_digest(source) != manifest['source']['sha256']:
             raise ValueError('file_changed')
-        indices = np.flatnonzero(arrays['retained'])
-        if not len(indices):
+        if not np.any(arrays['retained']):
             raise ValueError('empty_selection')
         before = Path(source).stat()
-        data = anndata.read_h5ad(source, backed='r')
-        try:
-            if data.shape != (manifest['source']['cells'], manifest['source']['genes']) or not np.array_equal(np.asarray(data.obs_names, dtype=str), arrays['cell_id']):
-                raise ValueError('file_changed')
-            progress(30, 'writing')
-            subset = data[indices, :].to_memory()
-            provenance_key = 'causalmed_qc_' + manifest['analysisId'].replace('-', '')
-            columns = {key: provenance_key + '_' + key for key in ('source_row', 'retained', 'total_counts', 'detected_genes', 'mito_percent', 'donor_id', 'donor_missing')}
-            if provenance_key in subset.uns or any(key in subset.obs for key in columns.values()):
-                raise ValueError('metadata_collision')
-            for key, column in columns.items():
-                subset.obs[column] = arrays[key][indices]
-            subset.uns[provenance_key] = {
-                'manifest_json': json.dumps(manifest, ensure_ascii=False, allow_nan=False, sort_keys=True),
-                'obs_columns_json': json.dumps(columns, sort_keys=True),
-                'selection_manifest_sha256': expected['manifestSha256'],
-            }
-            subset.write_h5ad(output, compression='gzip')
-            del subset
-            progress(80, 'export_verify')
-            check = anndata.read_h5ad(output, backed='r')
+        matched = manifest['source']['cells']
+        if kind == 'export_cohort':
+            import anndata as ad
+            if not isinstance(definition, dict) or len(definition.get('json', '').encode('utf-8')) > 65536 or hashlib.sha256(definition.get('json', '').encode('utf-8')).hexdigest() != definition.get('sha256'):
+                raise ValueError('invalid_export')
+            payload = json.loads(definition['json'])
+            observation = payload['alignment']['observation']
+            if payload['sourceSha256'] != manifest['source']['sha256'] or observation['qcId'] != expected['id'] or observation['manifestSha256'] != expected['manifestSha256'] or payload['metadata']['donorColumn'] != manifest['qc']['options']['donorColumn']:
+                raise ValueError('selection_changed')
+            data = ad.read_h5ad(source, backed='r')
             try:
-                if check.shape != (len(indices), data.n_vars) or not np.array_equal(np.asarray(check.obs_names, dtype=str), arrays['cell_id'][indices]):
-                    raise ValueError('export_verification_failed')
-                if check.uns[provenance_key]['manifest_json'] != json.dumps(manifest, ensure_ascii=False, allow_nan=False, sort_keys=True):
-                    raise ValueError('export_verification_failed')
+                selected = np.ones(data.n_obs, dtype=bool)
+                for role, value in (('conditionColumn', payload['conditionValue']), ('perturbationColumn', payload['perturbationValue'])):
+                    column = payload['metadata'][role]
+                    if not column or column not in data.obs or not isinstance(value, str) or not value.strip():
+                        raise ValueError('invalid_export')
+                    selected &= data.obs[column].astype('string').eq(value).fillna(False).to_numpy(dtype=bool)
             finally:
-                check.file.close()
-        finally:
-            data.file.close()
+                data.file.close()
+            matched = int(selected.sum())
+            arrays['retained'] = arrays['retained'] & selected
+            if not arrays['retained'].any():
+                raise ValueError('empty_selection')
+            mappings = {m['label']: m for m in payload['alignment']['settings']['mappings']}
+            arrays['canonical_donor_id'] = np.asarray([mappings.get(str(label), {}).get('canonicalId', '') for label in arrays['donor_id']], dtype=str)
+            arrays['canonical_donor_reviewed'] = np.asarray([mappings.get(str(label), {}).get('reviewed', False) for label in arrays['donor_id']], dtype=bool)
+            manifest['cohort'] = {'definition_json': definition['json'], 'definition_sha256': definition['sha256'], 'matched': matched, 'retained': int(arrays['retained'].sum()), 'source_rows_sha256': hashlib.sha256(arrays['source_row'][arrays['retained']].astype('<i8').tobytes()).hexdigest(), 'selection_rule': 'exact condition AND perturbation AND parent QC retained; missing values excluded'}
+        writer = globals().get('stream_retained_h5ad')
+        if writer is None:
+            from causalmed_worker.stream_export import stream_retained_h5ad as writer
+        provenance_key, streaming = writer(source, output, manifest, arrays, expected, progress)
         after = Path(source).stat()
         if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns) or file_digest(source) != manifest['source']['sha256']:
             raise ValueError('file_changed')
@@ -139,8 +138,9 @@ def export_selection(source, directory, output, expected, kind, progress=lambda 
     progress(95, 'export_verify')
     return {'kind': kind, 'selectionId': manifest['analysisId'], 'sourceSha256': manifest['source']['sha256'],
             'sha256': file_digest(output), 'bytes': output.stat().st_size,
-            'retained': manifest['qc']['retained'], 'excluded': manifest['qc']['excluded'],
-            'provenanceKey': provenance_key, 'createdAt': datetime.now(timezone.utc).isoformat()}
+            'retained': int(arrays['retained'].sum()), 'excluded': manifest['source']['cells'] - int(arrays['retained'].sum()),
+            'definitionId': payload['id'] if kind == 'export_cohort' else None, 'definitionSha256': definition['sha256'] if kind == 'export_cohort' else None, 'matched': matched if kind == 'export_cohort' else None,
+            'provenanceKey': provenance_key, 'streaming': streaming if kind in ('export_h5ad', 'export_cohort') else None, 'createdAt': datetime.now(timezone.utc).isoformat()}
 
 
 def compare_selections(left_dir, left, right_dir, right):
