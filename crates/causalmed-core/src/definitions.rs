@@ -18,6 +18,10 @@ pub struct DefinitionPayload {
     pub condition_value: String,
     pub perturbation_value: String,
     pub created_at: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub condition_values: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub perturbation_values: Vec<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -34,6 +38,35 @@ pub struct CohortDefinition {
     pub payload: DefinitionPayload,
     pub sha256: String,
     pub exports: Vec<CohortExport>,
+}
+impl DefinitionPayload {
+    pub fn conditions(&self) -> Vec<&str> {
+        effective(&self.condition_values, &self.condition_value)
+    }
+    pub fn perturbations(&self) -> Vec<&str> {
+        effective(&self.perturbation_values, &self.perturbation_value)
+    }
+}
+fn effective<'a>(values: &'a [String], single: &'a str) -> Vec<&'a str> {
+    if values.is_empty() {
+        vec![single]
+    } else {
+        values.iter().map(String::as_str).collect()
+    }
+}
+fn valid_values(values: &[String], single: &str) -> bool {
+    values.is_empty()
+        || (values.len() >= 2
+            && values.len() <= 20
+            && values.first().map(String::as_str) == Some(single)
+            && values.iter().all(|v| text(v, 200))
+            && values.windows(2).all(|v| v[0] < v[1]))
+}
+fn observed_matches(observed: Option<&str>, values: Vec<&str>) -> bool {
+    match observed {
+        Some(v) => values.contains(&v),
+        None => values.len() > 1,
+    }
 }
 pub fn payload_json(p: &DefinitionPayload) -> String {
     serde_json::to_string(p).expect("definition serialization")
@@ -68,6 +101,8 @@ pub(crate) fn validate(doc: &Document) -> Result<()> {
             || !text(&p.name, 200)
             || !text(&p.condition_value, 200)
             || !text(&p.perturbation_value, 200)
+            || !valid_values(&p.condition_values, &p.condition_value)
+            || !valid_values(&p.perturbation_values, &p.perturbation_value)
             || p.metadata.condition_column.is_empty()
             || p.metadata.perturbation_column.is_empty()
             || p.metadata.condition_column == p.metadata.perturbation_column
@@ -201,8 +236,11 @@ impl ResearchStore {
             || observation.genes != def.payload.source_genes
             || census.source_sha256 != observation.sha256
             || census.donor_column != def.payload.metadata.donor_column
-            || census.condition_value.as_deref() != Some(&def.payload.condition_value)
-            || census.perturbation_value.as_deref() != Some(&def.payload.perturbation_value)
+            || !observed_matches(census.condition_value.as_deref(), def.payload.conditions())
+            || !observed_matches(
+                census.perturbation_value.as_deref(),
+                def.payload.perturbations(),
+            )
         {
             return Err(invalid("cohort_origin_mismatch"));
         }
@@ -266,6 +304,8 @@ mod tests {
             condition_value: "A".into(),
             perturbation_value: "ctrl".into(),
             created_at: chrono::Utc::now().to_rfc3339(),
+            condition_values: vec![],
+            perturbation_values: vec![],
         };
         s.create_cohort_definition(p, doc.revision).unwrap();
         s
@@ -397,5 +437,47 @@ mod tests {
         json.as_object_mut().unwrap().remove("cohortDefinitions");
         let legacy: Document = serde_json::from_value(json).unwrap();
         assert!(legacy.cohort_definitions.is_empty());
+    }
+    #[test]
+    fn multi_values_are_canonical_portable_and_legacy_bytes_stay_unchanged() {
+        let legacy = defined().snapshot().cohort_definitions[0].clone();
+        let raw = payload_json(&legacy.payload);
+        assert!(!raw.contains("conditionValues"));
+        assert!(!raw.contains("perturbationValues"));
+        let old: DefinitionPayload = serde_json::from_str(&raw).unwrap();
+        assert_eq!(payload_json(&old), raw);
+        assert_eq!(payload_sha(&old), legacy.sha256);
+        let mut p = old;
+        p.id = "00000000-0000-4000-8000-000000000030".into();
+        p.condition_values = vec!["A".into(), "B".into()];
+        p.perturbation_values = vec!["ctrl".into(), "stim".into()];
+        let mut store = defined();
+        let d = store
+            .create_cohort_definition(p.clone(), store.snapshot().revision)
+            .unwrap();
+        let mut restored = ResearchStore::in_memory().unwrap();
+        restored.restore_document(d.clone(), 0).unwrap();
+        assert_eq!(
+            restored.snapshot().cohort_definitions[1].sha256,
+            payload_sha(&p)
+        );
+        for invalid in [
+            vec!["A".into()],
+            vec!["A".into(), "A".into()],
+            vec!["B".into(), "A".into()],
+            vec!["A".into(), "".into()],
+        ] {
+            let mut bad = d.clone();
+            let def = &mut bad.cohort_definitions[1];
+            def.payload.condition_values = invalid;
+            def.sha256 = payload_sha(&def.payload);
+            assert!(ResearchStore::in_memory()
+                .unwrap()
+                .restore_document(bad, 0)
+                .is_err());
+        }
+        assert!(observed_matches(None, p.conditions()));
+        assert!(!observed_matches(Some("outside"), p.conditions()));
+        assert!(!observed_matches(None, legacy.payload.conditions()));
     }
 }

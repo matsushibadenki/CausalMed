@@ -335,3 +335,20 @@ dialog footer { display: flex; justify-content: flex-end; gap: var(--space-2); m
 .worker-resources p {font-size:12px;line-height:1.5;margin-bottom:0}
 @media(max-width:800px){.worker-resources header>span{width:100%;margin-left:24px}.resource-metrics{gap:10px}.resource-metrics strong{font-size:11px}}
 .worker-runtime {font-size:10px;overflow-wrap:anywhere;color:var(--muted)}
+
+.multi-definition-form {grid-template-columns:minmax(0,1fr) auto;align-items:center}
+.multi-definition-form .cohort-name {min-width:0}
+.cohort-pickers {grid-column:1/-1;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.cohort-picker {min-width:0;padding:10px;border:1px solid var(--color-rule);border-radius:7px;margin:0}
+.cohort-picker legend {font-size:11px;overflow-wrap:anywhere;max-width:100%}
+.cohort-picker legend b {font-variant-numeric:tabular-nums;margin-left:6px}
+.cohort-picker-tools {display:flex;gap:5px;align-items:center;min-width:0;margin-bottom:6px}
+.cohort-picker-tools input {flex:1;width:0;min-width:50px}
+.cohort-choice-list {display:grid;gap:4px;max-height:150px;overflow:auto}
+.definition-form .cohort-choice-list label {display:flex;align-items:center;gap:6px;padding:4px;line-height:1.4;cursor:pointer}
+.definition-form .cohort-choice-list input[type=checkbox] {width:14px;height:14px;padding:0;margin:0;flex:0 0 14px;accent-color:#2a8285}
+.cohort-choice-list span {overflow-wrap:anywhere;min-width:0}
+.cohort-choice-list small {margin-left:auto;font-size:10px;white-space:nowrap;font-variant-numeric:tabular-nums}
+.cohort-selection-footer {grid-column:1/-1;display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:11px}
+.cohort-selection-footer .button {margin-left:auto}
+@media(max-width:800px){.cohort-pickers{grid-template-columns:minmax(0,1fr)}.cohort-selection-footer .button{margin-left:0}}

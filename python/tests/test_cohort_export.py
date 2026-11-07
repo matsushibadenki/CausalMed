@@ -43,3 +43,26 @@ class CohortExportTests(unittest.TestCase):
                 empty=json.loads(raw);empty['conditionValue']='absent';empty=json.dumps(empty);empty={'json':empty,'sha256':hashlib.sha256(empty.encode()).hexdigest()}
                 with self.assertRaisesRegex(ValueError,'empty_selection'):
                     export_selection(source,run,folder/'empty.h5ad',report['selection'],'export_cohort',definition=empty)
+
+    def test_multi_value_or_and_qc_missing_and_invalid_sets(self):
+        for matrix in (np.asarray, sparse.csr_matrix, sparse.csc_matrix):
+            with self.subTest(matrix=matrix.__name__), tempfile.TemporaryDirectory() as directory:
+                folder=Path(directory); source=folder/'synthetic.h5ad'; run=folder/'run'
+                data=ad.AnnData(matrix([[1,2],[3,4],[5,6],[0,0],[7,8],[9,10],[11,12]]),obs=pd.DataFrame({'donor':['D1']*7,'condition':['A','B','C','A',None,'B','A'],'perturbation':['ctrl','stim','ctrl','ctrl','ctrl','other',None]},index=[f'cell{i}' for i in range(7)]))
+                data.layers['counts']=data.X.copy();data.write_h5ad(source)
+                report=inspect(source,options={'donorColumn':'donor','minGenes':0},artifact_dir=run)
+                payload={'id':'00000000-0000-4000-8000-000000000001','sourceSha256':report['sha256'],'metadata':{'donorColumn':'donor','conditionColumn':'condition','perturbationColumn':'perturbation'},'conditionValue':'A','perturbationValue':'ctrl','conditionValues':['A','B'],'perturbationValues':['ctrl','stim'],'alignment':{'observation':{'qcId':report['selection']['id'],'manifestSha256':report['selection']['manifestSha256']},'settings':{'mappings':[{'label':'D1','canonicalId':'QA-only','reviewed':False}]}}}
+                def definition(p):
+                    raw=json.dumps(p);return {'json':raw,'sha256':hashlib.sha256(raw.encode()).hexdigest()}
+                output=folder/'multi.h5ad'
+                receipt=export_selection(source,run,output,report['selection'],'export_cohort',definition=definition(payload))
+                self.assertEqual((receipt['retained'],receipt['matched']),(2,3))
+                result=ad.read_h5ad(output)
+                self.assertEqual(list(result.obs_names),['cell0','cell1'])
+                actual=result.layers['counts'].toarray() if sparse.issparse(result.X) else result.layers['counts']
+                np.testing.assert_array_equal(actual,[[1,2],[3,4]])
+                for invalid in (['A'],['B','A'],['A','A'],['A',''],['B','C']):
+                    with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError,'invalid_export'):
+                        export_selection(source,run,folder/'bad.h5ad',report['selection'],'export_cohort',definition=definition({**payload,'conditionValues':invalid}))
+                    self.assertFalse((folder/'bad.h5ad').exists())
+                self.assertEqual(hashlib.sha256(source.read_bytes()).hexdigest(),report['sha256'])

@@ -338,6 +338,29 @@ fn create_cohort_definition(
     Ok(doc)
 }
 #[tauri::command]
+fn create_cohort_selection(
+    app: tauri::AppHandle,
+    state: State<AppState>,
+    project_key: String,
+    name: String,
+    condition_values: Vec<String>,
+    perturbation_values: Vec<String>,
+    expected_revision: u64,
+) -> Reply {
+    let _gate = state.project_gate.try_read().map_err(|_| "project_busy")?;
+    let doc = definitions::create_values(
+        &mut *state.store.lock().map_err(|_| "state_unavailable")?,
+        &state.worker(),
+        &project_key,
+        name,
+        condition_values,
+        perturbation_values,
+        expected_revision,
+    )?;
+    let _ = app.emit("document-changed", doc.revision);
+    Ok(doc)
+}
+#[tauri::command]
 fn rename_cohort_definition(
     app: tauri::AppHandle,
     state: State<AppState>,
@@ -1196,6 +1219,7 @@ pub fn run() {
             inspect_real_outcome,
             run_real_baseline,
             create_cohort_definition,
+            create_cohort_selection,
             rename_cohort_definition,
             export_cohort_definition,
             adopt_cohort_export,

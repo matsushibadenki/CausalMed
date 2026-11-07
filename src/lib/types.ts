@@ -27,7 +27,7 @@ export interface DonorMapping {label:string;canonicalId:string;reviewed:boolean;
 export interface CohortSettings {studyId:string;contextId:string;perturbationId:string;partition:string;isControl:boolean;reviewed:boolean;evidence:string;mappings:DonorMapping[]}
 export interface CohortReview {observation:CohortObservation;settings:CohortSettings;updatedAt:string}
 export interface Eligibility {ready:boolean;documentRevision:number;checkedAt:string;issues:string[];cohorts:{sourceSha256:string;issues:string[];mapped:number;total:number;participating:boolean}[];trainDonors:number;testDonors:number;overlaps:string[]}
-export interface CohortDefinition {payload:{id:string;name:string;sourceSha256:string;sourceCells:number;sourceGenes:number;metadata:DatasetMetadata;alignment:CohortReview;conditionValue:string;perturbationValue:string;createdAt:string};sha256:string;exports:{sha256:string;fileName:string;bytes:number;retained:number;matched:number}[]}
+export interface CohortDefinition {payload:{id:string;name:string;sourceSha256:string;sourceCells:number;sourceGenes:number;metadata:DatasetMetadata;alignment:CohortReview;conditionValue:string;perturbationValue:string;conditionValues?:string[];perturbationValues?:string[];createdAt:string};sha256:string;exports:{sha256:string;fileName:string;bytes:number;retained:number;matched:number}[]}
 
 export interface OutcomeSpec {featureId:string;featureColumn:string}
 export interface EvaluationPlan {spec:OutcomeSpec;measurementEvidence:string;reviewedFor:string|null}

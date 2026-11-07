@@ -28,6 +28,34 @@ pub fn create(
     perturbation: String,
     revision: u64,
 ) -> Result<Document, String> {
+    create_values(
+        store,
+        worker,
+        key,
+        name,
+        vec![condition],
+        vec![perturbation],
+        revision,
+    )
+}
+pub fn create_values(
+    store: &mut ResearchStore,
+    worker: &Worker,
+    key: &str,
+    name: String,
+    mut conditions: Vec<String>,
+    mut perturbations: Vec<String>,
+    revision: u64,
+) -> Result<Document, String> {
+    for values in [&mut conditions, &mut perturbations] {
+        if values.is_empty() || values.len() > 20 {
+            return Err("cohort_values_incomplete".into());
+        }
+        values.sort();
+        if values.windows(2).any(|v| v[0] == v[1]) {
+            return Err("cohort_values_incomplete".into());
+        }
+    }
     scope(worker, key)?;
     let report = worker.snapshot().report.ok_or("dataset_missing")?;
     let sha = report["sha256"].as_str().ok_or("invalid_definition")?;
@@ -48,16 +76,18 @@ pub fn create(
         return Err("cohort_stale".into());
     }
     worker.history_record(&alignment.observation.qc_id)?;
-    for (column, value) in [
-        (&dataset.metadata.condition_column, &condition),
-        (&dataset.metadata.perturbation_column, &perturbation),
+    for (column, values) in [
+        (&dataset.metadata.condition_column, &conditions),
+        (&dataset.metadata.perturbation_column, &perturbations),
     ] {
         let group = &report["groups"][column];
         if column.is_empty()
             || group["complete"] != true
-            || !group["counts"]
-                .as_array()
-                .is_some_and(|rows| rows.iter().any(|r| r["label"] == *value))
+            || !group["counts"].as_array().is_some_and(|rows| {
+                values
+                    .iter()
+                    .all(|value| rows.iter().any(|r| r["label"] == *value))
+            })
         {
             return Err("cohort_values_incomplete".into());
         }
@@ -71,8 +101,18 @@ pub fn create(
         source_genes: dataset.observation.genes,
         metadata: dataset.metadata.clone(),
         alignment: alignment.clone(),
-        condition_value: condition,
-        perturbation_value: perturbation,
+        condition_value: conditions[0].clone(),
+        perturbation_value: perturbations[0].clone(),
+        condition_values: if conditions.len() > 1 {
+            conditions
+        } else {
+            vec![]
+        },
+        perturbation_values: if perturbations.len() > 1 {
+            perturbations
+        } else {
+            vec![]
+        },
         created_at: chrono_now(),
     };
     store
@@ -142,6 +182,31 @@ pub fn adopt(
         })
     }) {
         return Err("cohort_origin_mismatch".into());
+    }
+    // The child's observed annotation inventory must be a nonempty subset of the
+    // frozen selections; a category with no retained parent rows may be absent.
+    for (column, values) in [
+        (
+            &def.payload.metadata.condition_column,
+            def.payload.conditions(),
+        ),
+        (
+            &def.payload.metadata.perturbation_column,
+            def.payload.perturbations(),
+        ),
+    ] {
+        let group = &r["groups"][column];
+        if group["complete"] != true
+            || group["missing"].as_u64().unwrap_or(0) != 0
+            || !group["counts"].as_array().is_some_and(|rows| {
+                !rows.is_empty()
+                    && rows
+                        .iter()
+                        .all(|r| r["label"].as_str().is_some_and(|v| values.contains(&v)))
+            })
+        {
+            return Err("cohort_origin_mismatch".into());
+        }
     }
     let observed = datasets::observation(&r)?;
     let mut metadata = def.payload.metadata.clone();
@@ -225,6 +290,18 @@ mod tests {
             .unwrap();
             ids.push(d.cohort_definitions.last().unwrap().payload.id.clone());
         }
+        let rev = store.snapshot().revision;
+        let d = create_values(
+            &mut store,
+            &worker,
+            &scope,
+            "Multiple cell types and perturbations QA".into(),
+            vec!["CD8 T cells".into(), "CD4 T cells".into()],
+            vec!["stim".into(), "ctrl".into()],
+            rev,
+        )
+        .unwrap();
+        ids.push(d.cohort_definitions.last().unwrap().payload.id.clone());
         let current_revision = store.snapshot().revision;
         assert!(create(
             &mut store,
@@ -236,6 +313,24 @@ mod tests {
             current_revision
         )
         .is_err());
+        for conditions in [
+            vec![],
+            vec!["CD4 T cells".into(), "CD4 T cells".into()],
+            vec!["not-observed".into()],
+        ] {
+            let revision = store.snapshot().revision;
+            assert!(create_values(
+                &mut store,
+                &worker,
+                &scope,
+                "invalid".into(),
+                conditions,
+                vec!["ctrl".into()],
+                revision
+            )
+            .is_err());
+            assert_eq!(store.snapshot().revision, revision);
+        }
         let mut outputs = vec![];
         for (i, id) in ids.iter().enumerate() {
             let doc = store.snapshot();
@@ -265,10 +360,12 @@ mod tests {
             let code = r#"import anndata as ad,numpy as np,json,sys
 from scipy import sparse
 p=ad.read_h5ad(sys.argv[1]);c=ad.read_h5ad(sys.argv[2]);m=np.load(sys.argv[3],allow_pickle=False)
-rows=np.flatnonzero(m['retained'] & p.obs['cell_type'].astype('string').eq('CD4 T cells').to_numpy() & p.obs['label'].astype('string').eq(sys.argv[4]).to_numpy())
+cs=['CD4 T cells','CD8 T cells'] if sys.argv[4]=='multi' else ['CD4 T cells']
+ps=['ctrl','stim'] if sys.argv[4]=='multi' else [sys.argv[4]]
+rows=np.flatnonzero(m['retained'] & p.obs['cell_type'].astype('string').isin(cs).to_numpy() & p.obs['label'].astype('string').isin(ps).to_numpy())
 assert list(c.obs_names)==list(p.obs_names[rows]);assert (c.X!=p.X[rows]).nnz==0
 assert list(c.obs['replicate'].astype('string'))==list(p.obs['replicate'].iloc[rows].astype('string'))
-key=next(k for k in c.uns if k.startswith('causalmed_cohort_'));o=c.uns[key];payload=json.loads(o['definition_json']);assert payload['perturbationValue']==sys.argv[4]
+key=next(k for k in c.uns if k.startswith('causalmed_cohort_'));o=c.uns[key];payload=json.loads(o['definition_json']);assert payload.get('conditionValues',[payload['conditionValue']])==cs;assert payload.get('perturbationValues',[payload['perturbationValue']])==ps
 prefix='causalmed_qc_'+payload['alignment']['observation']['qcId'].replace('-','');maps={x['label']:x for x in payload['alignment']['settings']['mappings']}
 assert list(c.obs[prefix+'_source_row'])==list(rows)
 assert list(c.obs[prefix+'_canonical_donor_id'])==[maps[str(x)]['canonicalId'] for x in c.obs['replicate'].astype('string')]
@@ -285,7 +382,13 @@ print('COHORT_REAL',sys.argv[4],len(rows),len(c.var_names))"#;
                         .join(report["selection"]["id"].as_str().unwrap())
                         .join("cells.npz"),
                 )
-                .arg(if i == 0 { "ctrl" } else { "stim" })
+                .arg(if i == 0 {
+                    "ctrl"
+                } else if i == 1 {
+                    "stim"
+                } else {
+                    "multi"
+                })
                 .output()
                 .unwrap();
             assert!(
@@ -306,14 +409,19 @@ print('COHORT_REAL',sys.argv[4],len(rows),len(c.var_names))"#;
             let rev = store.snapshot().revision;
             let d = adopt(&mut store, &worker, &scope, id, rev).unwrap();
             let child = d.cohorts.last().unwrap();
-            assert_eq!(
-                child.observation.condition_value.as_deref(),
-                Some("CD4 T cells")
-            );
-            assert_eq!(
-                child.observation.perturbation_value.as_deref(),
-                Some(if i == 0 { "ctrl" } else { "stim" })
-            );
+            if i == 2 {
+                assert!(child.observation.condition_value.is_none());
+                assert!(child.observation.perturbation_value.is_none());
+            } else {
+                assert_eq!(
+                    child.observation.condition_value.as_deref(),
+                    Some("CD4 T cells")
+                );
+                assert_eq!(
+                    child.observation.perturbation_value.as_deref(),
+                    Some(if i == 0 { "ctrl" } else { "stim" })
+                );
+            }
             assert!(child
                 .settings
                 .mappings
@@ -341,11 +449,14 @@ print('COHORT_REAL',sys.argv[4],len(rows),len(c.var_names))"#;
         assert!(!assessment.ready);
         assert!(assessment.issues.contains(&"study_overlap".into()));
         assert!(assessment.issues.contains(&"donor_overlap".into()));
-        for child in assessment.cohorts.iter().skip(1) {
+        for child in assessment.cohorts.iter().skip(1).take(2) {
             assert!(!child.issues.contains(&"condition_unresolved".into()));
             assert!(!child.issues.contains(&"perturbation_unresolved".into()));
             assert!(!child.issues.contains(&"source_unverified".into()));
         }
+        let mixed = assessment.cohorts.last().unwrap();
+        assert!(mixed.issues.contains(&"condition_unresolved".into()));
+        assert!(mixed.issues.contains(&"perturbation_unresolved".into()));
         // Same child SHA in another project cannot import the first project's donor links.
         let bw = Worker::new(b.path());
         bw.reserve(120).unwrap();
@@ -366,8 +477,8 @@ print('COHORT_REAL',sys.argv[4],len(rows),len(c.var_names))"#;
         project::save(stage.path(), &package).unwrap();
         let unpacked = project::unpack(&package, root.path()).unwrap();
         let restored = project::validate(unpacked.path()).unwrap();
-        assert_eq!(restored.cohort_definitions.len(), 2);
-        assert_eq!(restored.cohorts.len(), 3);
+        assert_eq!(restored.cohort_definitions.len(), 3);
+        assert_eq!(restored.cohorts.len(), 4);
         assert_eq!(restored.cohorts[1].settings, doc.cohorts[1].settings);
         fs::copy(
             unpacked.path().join("selected.json"),
@@ -401,7 +512,7 @@ print('COHORT_REAL',sys.argv[4],len(rows),len(c.var_names))"#;
         for child in checked.cohorts.iter().skip(1) {
             assert!(!child.issues.contains(&"source_unverified".into()));
         }
-        let def = definition(&restored, &ids[0]).unwrap();
+        let def = definition(&restored, &ids[2]).unwrap();
         let out = root.path().join("restored-export.h5ad");
         let restored_source = restart
             .export_source(&def.payload.alignment.observation.qc_id)
@@ -415,6 +526,15 @@ print('COHORT_REAL',sys.argv[4],len(rows),len(c.var_names))"#;
             job(def),
         );
         assert_eq!(restart.snapshot().status, "completed");
+        let receipt = restart.snapshot().last_export.unwrap();
+        assert_eq!(
+            receipt["retained"].as_u64().unwrap(),
+            doc.cohort_definitions[2].exports[0].retained
+        );
+        assert_eq!(
+            receipt["matched"].as_u64().unwrap(),
+            doc.cohort_definitions[2].exports[0].matched
+        );
         assert_eq!(
             project::digest(&root.path().join("moved-original.h5ad")).unwrap(),
             original_sha

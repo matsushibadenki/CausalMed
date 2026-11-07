@@ -1,6 +1,6 @@
 # CausalMed roadmap
 
-Updated: 2026-11-06. The first research context is IPF. Public PBMC data verifies software behavior; biological and predictive validation remains separate.
+Updated: 2026-11-07. The first research context is IPF. Public PBMC data verifies software behavior; biological and predictive validation remains separate.
 
 Status notation:
 
@@ -44,8 +44,9 @@ Status notation:
 5. 🟢 [Done] Single-gene real-H5AD observation inspection and guarded M0: donor means, exact feature-space/matrix alignment, measurement review, fresh eligibility, explicit abstention and portable audit snapshots. Public Kang values and negative eligibility verified; successful scoring verified only with synthetic fixtures.
 6. 🟢 [Done] Per-project worker budgets, live sampled RSS/CPU meters, kernel CPU fallback, numerical-library thread requests, explicit stop reasons and safe retry; real Kang import/export and native UI verified.
 7. 🟢 [Done] Bundle pinned Python/dependencies for Apple-silicon macOS 14+, isolated execution without development fallback, full build inventory/audit, relocated-app real-H5AD ingestion/QC/export and resource-stop/retry verification.
-8. 🟠 [Next] Strict OS memory containment, signed/notarized clean-machine distribution and additional runtime targets.
-9. 🔴 [Later] Multivariate evaluation after validated dataset/donor/perturbation mappings; encryption and full GPU exploration remain subsequent increments.
+8. 🟢 [Done] Multi-value cohort selection with searchable counted checkboxes, frozen OR/AND rules, compatible historical digests, portable restore and mixed-annotation eligibility abstention.
+9. 🟠 [Next] Bound annotation memory, strict OS memory containment, signed/notarized clean-machine distribution and additional runtime targets.
+10. 🔴 [Later] Multivariate evaluation after validated dataset/donor/perturbation mappings; encryption and full GPU exploration remain subsequent increments.
 
 ## Closest next increments
 
@@ -53,7 +54,8 @@ Status notation:
 - 🟢 [Done] Explicit common donor identities, evidence, draft/review states and study/context/perturbation semantics; no automatic label merging. Conservative preflight checks complete QC, provenance, exact census, missing/independent donors, study/donor/perturbation separation, source/artifact SHA-256 and stale metadata. Portable restoration validates cohort-to-QC references. See [donor alignment validation](DONOR_ALIGNMENT_VALIDATION.md).
 - 🟢 [Done] Mixed-source cohort definitions, exact condition AND perturbation AND parent-QC selection, streamed H5AD export with original/common donor IDs and review flags, SHA-bound project-local output receipts, explicit derived-source adoption and portable lineage validation. Real Kang control/stimulus cohorts, project isolation, restore/relink/re-export and eligibility rechecks verified. See [mixed-cohort validation](MIXED_COHORT_VALIDATION.md).
 - 🟢 [Done] Scalar count outcome normalization, exact feature-ID alignment, donor charts and guarded real-H5AD M0 execution with saved/reselected input snapshots, stale-review rejection, restore/relink and project isolation. See [real-outcome validation](REAL_OUTCOME_VALIDATION.md).
-- 🟠 [Next] Verified dataset adapters and independently reviewed comparable study pairs; multi-gene outcomes and uncertainty estimates. Multi-value filters and broader cohort exploration follow the exact-value workflow.
+- 🟢 [Done] Multi-value exact annotation filters: explicit selection, search/select-all/clear, original-source counts, OR within roles and AND with parent QC, immutable canonical lists, legacy digest preservation, donor lineage and conservative mixed adoption. Public Kang 12,859-cell export, restore/relink/re-export and project isolation verified. See [multi-value validation](MULTI_VALUE_COHORT_VALIDATION.md).
+- 🟠 [Next] Verified dataset adapters and independently reviewed comparable study pairs; multi-gene outcomes and uncertainty estimates. Broader cohort exploration follows the multi-value workflow.
 - 🟢 [Done] Save per-cell retained/excluded decisions, overlapping rule flags, metrics, donor IDs and source-row identities with checksummed QC manifests.
 - 🟢 [Done] Export complete QC results as ZIP and retained rows as a new H5AD, including conditions and donor mapping. Preserve original data, reject existing destinations, and publish only after successful worker verification.
 - 🟢 [Done] QC history list, condition/result comparison, exact cell-decision transitions, persistent reselection and export from past runs, verified with public Kang H5AD.
@@ -88,7 +90,8 @@ Status notation:
 
 - ⭕️ [Pending] Independent biological and prospective laboratory validation.
 - ⭕️ [Pending] Windows/Linux native rendering, window behavior, worker lifecycle and resource monitoring. Linux resource code is unvalidated here; unsupported platforms withhold worker execution.
-- ⭕️ [Pending] Additional narrow-window cohort-definition capture: desktop workflow passed, but Computer Use lost window access and timed out during further layout capture.
+- 🟢 [Done] Multi-value cohort native selection/export, restart persistence and EN/JA/简体中文 display, including final 1,024-pixel compact layout.
+- 🟠 [Next] Full 720-pixel native cohort layout and keyboard-only interaction regression.
 - 🟢 [Done] Final native scalar-evaluation restart and EN/JA/简体中文 display checks. Saved ISG15 observations and abstention survived restart; Japanese reinspection reproduced eight donor summaries without the transient project-busy banner.
 - ⭕️ [Pending] Distribution signing/notarization, fresh-machine installation, and Intel macOS/Windows/Linux runtime packages. Relocation and absent-development-runtime validation passed on the development Mac; this is not a clean-machine certification.
 

@@ -111,11 +111,14 @@ def export_selection(source, directory, output, expected, kind, progress=lambda 
             data = ad.read_h5ad(source, backed='r')
             try:
                 selected = np.ones(data.n_obs, dtype=bool)
-                for role, value in (('conditionColumn', payload['conditionValue']), ('perturbationColumn', payload['perturbationValue'])):
-                    column = payload['metadata'][role]
-                    if not column or column not in data.obs or not isinstance(value, str) or not value.strip():
+                for role, single, many in (('conditionColumn', payload['conditionValue'], payload.get('conditionValues', [])), ('perturbationColumn', payload['perturbationValue'], payload.get('perturbationValues', []))):
+                    if not isinstance(many, list) or (many and (not 2 <= len(many) <= 20 or any(not isinstance(v, str) or not v.strip() or len(v.encode('utf-8')) > 200 or '\0' in v for v in many) or many != sorted(set(many)) or many[0] != single)):
                         raise ValueError('invalid_export')
-                    selected &= data.obs[column].astype('string').eq(value).fillna(False).to_numpy(dtype=bool)
+                    values = many or [single]
+                    column = payload['metadata'][role]
+                    if not column or column not in data.obs or not isinstance(single, str) or not single.strip():
+                        raise ValueError('invalid_export')
+                    selected &= data.obs[column].astype('string').isin(values).fillna(False).to_numpy(dtype=bool)
             finally:
                 data.file.close()
             matched = int(selected.sum())
@@ -125,7 +128,7 @@ def export_selection(source, directory, output, expected, kind, progress=lambda 
             mappings = {m['label']: m for m in payload['alignment']['settings']['mappings']}
             arrays['canonical_donor_id'] = np.asarray([mappings.get(str(label), {}).get('canonicalId', '') for label in arrays['donor_id']], dtype=str)
             arrays['canonical_donor_reviewed'] = np.asarray([mappings.get(str(label), {}).get('reviewed', False) for label in arrays['donor_id']], dtype=bool)
-            manifest['cohort'] = {'definition_json': definition['json'], 'definition_sha256': definition['sha256'], 'matched': matched, 'retained': int(arrays['retained'].sum()), 'source_rows_sha256': hashlib.sha256(arrays['source_row'][arrays['retained']].astype('<i8').tobytes()).hexdigest(), 'selection_rule': 'exact condition AND perturbation AND parent QC retained; missing values excluded'}
+            manifest['cohort'] = {'definition_json': definition['json'], 'definition_sha256': definition['sha256'], 'matched': matched, 'retained': int(arrays['retained'].sum()), 'source_rows_sha256': hashlib.sha256(arrays['source_row'][arrays['retained']].astype('<i8').tobytes()).hexdigest(), 'selection_rule': 'exact-value OR within each role; condition AND perturbation AND parent QC retained; missing values excluded'}
         writer = globals().get('stream_retained_h5ad')
         if writer is None:
             from causalmed_worker.stream_export import stream_retained_h5ad as writer
