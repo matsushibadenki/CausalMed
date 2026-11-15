@@ -1,0 +1,13 @@
+# Legacy annotation tables and variable-length strings
+
+The read-only H5AD projection accesses fields of pre-0.7 compound observation and variable tables separately. It uses the same AnnData field decoder to preserve index names, fixed strings, UTF-8 values and numeric types. Legacy categorical codes retain their dictionary, label order and missing values. Category discovery validates codes in projected blocks. QC, outcome and cohort filters that use row positions avoid decoding their index labels for every annotation read.
+
+Legacy export converts selected annotation fields directly into modern HDF5 dataframes, including legacy raw feature tables. It preserves original annotation values and column order, and appends the existing QC and donor provenance columns. Numeric reads use the existing block limit. Reads of variable-length strings in projected annotations, indices, streamed large string dictionaries and one-dimensional export columns use at most 256 entries per read. This increment introduced an element limit. The subsequent [byte-budget validation](VLEN_BYTE_BUDGET_VALIDATION.md) covers protected variable-length reads and projected dictionaries.
+
+A fresh-process synthetic probe read one selected column from a legacy structured table with 4,096 rows and eight approximately 4 KiB UTF-8 annotation fields. Additional high-water RSS fell from 460.1 MiB for the full AnnData table decode to 181.0 MiB for the projected scan. The selected values produced SHA-256 `c72f0aa1494d7f535df0179b3df899452d968e0bb396edb00f5d067778b5bc18` in both cases. The measurement isolates reading one annotation column and includes HDF5 and Python allocations.
+
+The end-to-end synthetic regression prevents whole-compound-table reads and whole-index materialization. It checks the variable-length read limit and compares source row order, duplicate index names, Unicode annotations, category labels, gene metadata and expression with independent AnnData readback.
+
+Kang 2018 uses pre-0.7 compound tables with variable-length UTF-8 fields. QC retained 24,562 of 24,673 cells. Independent full AnnData readback matched all 12 source observation columns, the feature annotation table and every retained expression value. The original file kept SHA-256 `e6a5adac64dcdeb36eaba27db49b63e0c64bb0ed4a64c6705971506b41c39830`. The supervised Rust restart test recovered the QC history and exported QC ZIP and retained H5AD.
+
+The portable project integration restored and reconnected the original by SHA-256, then re-exported the 12,859-cell mixed cohort with donor lineage. Frontend build and 21 tests, Rust core 23 tests, app compile check and both public integrations passed. Python ran 67 tests with two PBMC-dependent cases skipped.

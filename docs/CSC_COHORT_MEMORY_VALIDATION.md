@@ -1,0 +1,11 @@
+# CSC decoding and cohort metadata memory
+
+Backed CSC QC reads column pointers and sparse entries directly from HDF5. For column blocks of up to 262,144 stored entries, it remaps the occupied source rows to a compact CSR block. Reductions scatter to the same original row positions and use the prior logical column grouping. Raw nonfinite, negative and fractional entries are counted before duplicate consolidation. Oversized strictly increasing single columns use bounded entry scans and avoid CSR conversion. The later [oversized CSC decoder](OVERSIZED_CSC_VALIDATION.md) covers multi-column groups and unsorted or duplicate-bearing columns. Matrix decode still uses temporary storage proportional to the entries in each processed block.
+
+Cohort export intersects the annotation filter with the parent QC mask in place on a scratch vector, using a temporary mapping when it exceeds 8 MiB. The original retained mask remains read-only. Canonical donor IDs and review flags are produced only for selected rows requested by the HDF5 writer. The cohort's canonical source-row hash and exported annotation schema retain their earlier formats.
+
+A fresh-process synthetic probe decoded one CSC column in a four-million-row matrix with 4,096 stored entries. Additional peak RSS fell from 31.9 MiB to 0.9 MiB. The CSR pointer count fell from 4,000,001 to 4,097. Both paths yielded SHA-256 `a94c644c88a7b941f829679938c1adbb1d1f065da426a817554097edd1677eaf` over the same occupied source rows and values. This measures decoding, excluding full QC and export.
+
+A backed CSC regression forces both the compact decoder and the oversized-column path, comparing the QC report and saved per-cell totals and detection counts with the existing in-memory reference. Cohort tests check source rows, expression values, canonical donor mappings and review flags.
+
+Public Kang QC retained 24,562 cells. The Python round trip confirmed retained expression entries, row IDs and donor labels. The Rust worker recovered the QC selection after restart and wrote ZIP and H5AD exports. The portable-project test restored the 12,859-cell mixed cohort and its donor lineage, reconnected the original by SHA-256 and exported again. Frontend build and 21 tests, Rust core 23 tests, app compile check and both public Rust integrations passed. Python ran 65 tests with two PBMC-dependent cases skipped.

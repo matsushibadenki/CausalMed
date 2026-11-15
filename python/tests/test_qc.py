@@ -22,6 +22,101 @@ class ExpressionQcTests(unittest.TestCase):
         matrix = np.array([[1,4,0,0],[0,0,0,0],[3,1,1,0],[0,10,20,0],[0,2,0,0]],dtype=float)
         return ad.AnnData(constructor(matrix),obs=pd.DataFrame({'subject':['D1',None,'D2','D2',' ']},index=[f'c{i}' for i in range(5)]),var=pd.DataFrame(index=['MT-ND1','G1','G2','G3']))
 
+    def test_backed_csc_compact_and_long_column_paths_match_reference(self):
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'csc.synthetic.h5ad'
+            matrix = sparse.csc_matrix((np.array([1., 2., 3., 4., 5.]),
+                                        np.array([0, 2, 4, 8191, 8999]),
+                                        np.array([0, 5])), shape=(9000, 1))
+            data = ad.AnnData(matrix, var=pd.DataFrame(index=['MT-A']))
+            options = {'minGenes': 0, 'maxMitoPct': None}
+            expected = quality_control(data, options)
+            data.write_h5ad(path)
+            for limit in (2, 64):
+                with self.subTest(limit=limit), patch('causalmed_worker.qc.CSC_ENTRY_LIMIT', limit):
+                    report = inspect(path, options=options, artifact_dir=Path(directory) / str(limit))
+                    self.assertEqual({key: report['qc'][key] for key in expected}, expected)
+                    with np.load(Path(directory) / str(limit) / 'cells.npz', allow_pickle=False) as archive:
+                        np.testing.assert_array_equal(archive['total_counts'], matrix.toarray().ravel())
+                        np.testing.assert_array_equal(archive['detected_genes'], (matrix.toarray() > 0).ravel())
+
+    def test_oversized_csc_reorders_rows_and_preserves_duplicate_arithmetic(self):
+        from unittest.mock import patch
+        from causalmed_worker.backed import open_research_h5ad
+
+        cases = [
+            ([250, 3, 10, 10, 2, 5, 7, 11], np.uint8, [0, 5, 8]),
+            ([1e16, 3, 1, 1, 2, 5, 7, 11], np.float64, [0, 5, 8]),
+            ([1, 3, 2, 3, 2, 5, 7, 11], np.int64, [0, 8]),
+            ([1, 3, -1, 0.5, 2, np.nan, 7, 11], np.float64, [0, 5, 8]),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            for values, dtype, pointers in cases:
+                with self.subTest(dtype=dtype, pointers=pointers):
+                    width = len(pointers) - 1
+                    matrix = sparse.csc_matrix((
+                        np.asarray(values, dtype=dtype),
+                        np.array([8999, 1, 8999, 8999, 0, 1, 8999, 1]),
+                        np.array(pointers),
+                    ), shape=(9000, width))
+                    data = ad.AnnData(matrix, var=pd.DataFrame(index=['MT-A', 'B'][:width]))
+                    options = {'minGenes': 0, 'maxMitoPct': None}
+                    expected_arrays = {}
+                    expected = quality_control(data, options, selection_callback=expected_arrays.update)
+                    path = Path(directory) / 'noncanonical.h5ad'
+                    data.write_h5ad(path)
+                    projection = open_research_h5ad(path)
+                    actual_arrays = {}
+                    try:
+                        with patch('causalmed_worker.qc.CSC_ENTRY_LIMIT', 2), patch.object(
+                            type(projection.X), '__getitem__', side_effect=AssertionError('full CSC decode')
+                        ):
+                            actual = quality_control(projection, options, selection_callback=actual_arrays.update)
+                    finally:
+                        projection.file.close()
+                    self.assertEqual(actual, expected)
+                    self.assertEqual(actual_arrays.keys(), expected_arrays.keys())
+                    for key, values in expected_arrays.items():
+                        np.testing.assert_array_equal(actual_arrays[key], values, err_msg=key)
+
+    def test_disk_backed_csc_aggregates_match_reference_across_row_blocks(self):
+        from unittest.mock import patch
+        from causalmed_worker.backed import scratch_vector
+
+        matrix = np.tile([[1, 4], [0, 0], [4, 1]], (3000, 1))
+        data = ad.AnnData(sparse.csc_matrix(matrix), var=pd.DataFrame(index=['MT-A', 'G1']))
+        saved = {}
+
+        def disk_only(length, dtype):
+            return scratch_vector(length, dtype, memory_limit=0)
+
+        with patch('causalmed_worker.qc.scratch_vector', side_effect=disk_only):
+            report = quality_control(data, {'minGenes': 1, 'maxMitoPct': 20}, selection_callback=saved.update)
+        np.testing.assert_array_equal(saved['total_counts'], matrix.sum(axis=1))
+        np.testing.assert_array_equal(saved['detected_genes'], (matrix > 0).sum(axis=1))
+        np.testing.assert_array_equal(saved['mito_percent'], np.tile([20., np.nan, 80.], 3000))
+        np.testing.assert_array_equal(saved['reason_bits'], np.tile([0, 3, 32], 3000))
+        self.assertIsInstance(saved['total_counts'], np.memmap)
+        self.assertEqual(report['retained'], 3000)
+
+    def test_block_histogram_matches_numpy_edges_counts_and_exact_median(self):
+        from causalmed_worker.qc import _histogram
+        for values, log, mask in [
+            (np.arange(16387, dtype=np.int64) % 257, True, None),
+            (np.linspace(0, 100, 16385), False, np.arange(16385) % 3 != 0),
+        ]:
+            expected = values if mask is None else values[mask]
+            transformed = np.log10(expected + 1) if log else expected
+            counts, edges = np.histogram(transformed, bins=32, range=(0, max(float(transformed.max()), 1.0)))
+            actual = _histogram(values, log=log, included=mask)
+            np.testing.assert_array_equal(actual['counts'], counts)
+            np.testing.assert_array_equal(actual['edges'], 10**edges - 1 if log else edges)
+            self.assertEqual(actual['median'], float(np.median(expected)))
+            self.assertEqual(actual['min'], float(expected.min()))
+            self.assertEqual(actual['max'], float(expected.max()))
+
     def test_dense_csr_csc_backed_metrics_and_overlapping_filters_agree(self):
         options={'donorColumn':'subject','minGenes':2,'maxGenes':3,'minCounts':3,'maxCounts':20,'maxMitoPct':20}
         for constructor in (np.asarray,sparse.csr_matrix,sparse.csc_matrix):

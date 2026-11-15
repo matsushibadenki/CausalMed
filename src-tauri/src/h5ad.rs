@@ -811,7 +811,9 @@ impl Worker {
                                         | "empty_selection"
                                         | "metadata_collision"
                                         | "invalid_export"
-                                        | "export_verification_failed"),
+                                        | "export_verification_failed"
+                                        | "unsupported_export_encoding"
+                                        | "vlen_budget_exceeded"),
                                     ) => code,
                                     _ => "worker_failed",
                                 }
@@ -1132,6 +1134,8 @@ pub(crate) fn valid_report(r: &Value) -> bool {
 }
 pub fn worker_script() -> &'static str {
     concat!(
+        include_str!("../../python/causalmed_worker/backed.py"),
+        "\n",
         include_str!("../../python/causalmed_worker/qc.py"),
         "\n",
         include_str!("../../python/causalmed_worker/stream_export.py"),
@@ -1226,6 +1230,7 @@ mod tests {
         let previous = std::fs::read(&worker.destination).unwrap();
         for (script, status, timeout) in [
             ("raise RuntimeError('failure')", "failed", 10),
+            ("import json,sys; print(json.dumps({'type':'error','code':'unsupported_export_encoding'})); sys.exit(1)", "failed", 10),
             ("import time; time.sleep(60)", "timed_out", 1),
         ] {
             worker.reserve(timeout).unwrap();
@@ -1243,6 +1248,9 @@ mod tests {
                 },
             );
             assert_eq!(worker.snapshot().status, status);
+            if script.contains("unsupported_export_encoding") {
+                assert_eq!(worker.snapshot().error.as_deref(), Some("unsupported_export_encoding"));
+            }
             assert!(!destination.exists());
             assert!(!temporary_path.exists());
             assert_eq!(std::fs::read(&worker.destination).unwrap(), previous);

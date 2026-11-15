@@ -5,6 +5,9 @@ import json
 from pathlib import Path
 import sys
 
+if 'open_research_h5ad' not in globals():
+    from causalmed_worker.backed import open_research_h5ad, categorical_columns, annotation_schema, annotation_group, duplicate_frame_ids
+
 
 def emit(message):
     print(json.dumps(message, ensure_ascii=False, allow_nan=False), flush=True)
@@ -21,8 +24,6 @@ if 'save_selection' not in globals():
 def inspect(path, progress=lambda percent, phase: None, options=None, expected_sha=None, artifact_dir=None):
     options = qc_options(options)
     progress(1, 'runtime')
-    import anndata
-    import pandas as pd
     path = Path(path).resolve(strict=True)
     if path.suffix.lower() != '.h5ad' or not path.is_file():
         raise ValueError('invalid_h5ad')
@@ -39,7 +40,7 @@ def inspect(path, progress=lambda percent, phase: None, options=None, expected_s
     if expected_sha and digest.hexdigest() != expected_sha:
         raise ValueError('file_changed')
     progress(52, 'opening')
-    data = anndata.read_h5ad(path, backed='r')
+    data = open_research_h5ad(path)
     try:
         if data.n_obs == 0 or data.n_vars == 0:
             raise ValueError('empty_h5ad')
@@ -48,42 +49,32 @@ def inspect(path, progress=lambda percent, phase: None, options=None, expected_s
         for name in columns[:256]:
             if len(name.encode("utf-8")) > 500:
                 continue
-            column = data.obs[name]
-            dtype = column.dtype
-            kind = ('categorical' if isinstance(dtype, pd.CategoricalDtype) else
-                    'boolean' if pd.api.types.is_bool_dtype(dtype) else
-                    'numeric' if pd.api.types.is_numeric_dtype(dtype) else
-                    'string' if pd.api.types.is_string_dtype(dtype) else 'unknown')
-            obs_schema.append({'name': name, 'dtype': str(dtype)[:100], 'kind': kind, 'nullable': bool(column.isna().any())})
+            obs_schema.append(annotation_schema(data.obs, name))
         groups = {}
         # Prefer research annotations, then actual categorical annotations (e.g. louvain).
         preferred = ('donor', 'donor_id', 'cell_type', 'celltype', 'perturbation', 'condition', 'louvain', 'leiden')
-        candidates = list(dict.fromkeys([k for k in preferred if k in data.obs] + [k for k in data.obs if isinstance(data.obs[k].dtype, pd.CategoricalDtype)]))[:12]
+        candidates = [key for key in preferred if key in data.obs]
+        for key in categorical_columns(data.obs):
+            if len(candidates) >= 12:
+                break
+            if key not in candidates:
+                candidates.append(key)
         progress(65, 'annotations')
         for index, key in enumerate(candidates):
-            series = data.obs[key].astype('string')
-            counts = series.dropna().value_counts()
-            groups[str(key)[:200]] = {
-                'distinct': len(counts), 'missing': int(series.isna().sum()),
-                'complete': len(counts) <= 20 and all(len(str(k).encode('utf-8')) <= 200 for k in counts.index),
-                'other': int(counts.iloc[20:].sum()),
-                'counts': [{'label': str(k)[:200], 'count': int(v)} for k, v in counts.iloc[:20].items()],
-            }
+            groups[str(key)[:200]] = annotation_group(data.obs, key)
             progress(65 + int(5 * (index + 1) / max(len(candidates), 1)), 'annotations')
         selection = {}
-        qc = quality_control(data, options, progress, selection.update if artifact_dir else None)
+        qc = quality_control(data, options, progress, selection.update if artifact_dir else None,
+                             stream_selection=True)
         # Bind bounded annotation context to the immutable QC manifest.
         qc['annotationContext'] = {key: {**group, 'counts': group['counts'] if group['complete'] and group['distinct'] == 1 else []} for key, group in groups.items()}
         progress(95, 'validating')
-        after = path.stat()
-        if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
-            raise ValueError('file_changed')
         report = {'schemaVersion': 1, 'name': path.name[:500], 'sha256': digest.hexdigest(),
                 'bytes': before.st_size, 'cells': data.n_obs, 'genes': data.n_vars,
                 'obsColumns': [c[:200] for c in columns[:200]], 'totalObsColumns': len(columns),
                 'obsSchema': obs_schema, 'obsSchemaTruncated': len(obs_schema) < len(columns),
-                'duplicateCellIds': int(data.obs_names.duplicated().sum()),
-                'duplicateGeneIds': int(data.var_names.duplicated().sum()), 'groups': groups,
+                'duplicateCellIds': duplicate_frame_ids(data.obs),
+                'duplicateGeneIds': duplicate_frame_ids(data.var), 'groups': groups,
                 'synthetic': None, 'validation': 'expression_qc', 'anndataVersion': version('anndata'),
                 'matrices': ['X'] + (['raw'] if data.raw is not None else []) + ['layer:' + str(k) for k in list(data.layers)[:30]],
                 'geneColumns': [str(k) for k in data.var.columns[:100]],
@@ -104,6 +95,9 @@ def inspect(path, progress=lambda percent, phase: None, options=None, expected_s
         if artifact_dir and selection:
             progress(97, 'selection')
             report['selection'] = save_selection(artifact_dir, report, selection)
+        after = path.stat()
+        if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+            raise ValueError('file_changed')
         return report
     finally:
         data.file.close()
@@ -143,7 +137,7 @@ def main():
     except ModuleNotFoundError:
         emit({'type': 'error', 'code': 'python_dependencies_missing'})
     except ValueError as error:
-        code = str(error) if str(error) in ('invalid_qc_options', 'invalid_donor_column', 'invalid_gene_column', 'invalid_matrix', 'file_changed', 'selection_changed', 'source_conflict', 'empty_selection', 'metadata_collision', 'invalid_export', 'export_verification_failed', 'unsupported_export_encoding') else 'invalid_h5ad'
+        code = str(error) if str(error) in ('invalid_qc_options', 'invalid_donor_column', 'invalid_gene_column', 'invalid_matrix', 'file_changed', 'selection_changed', 'source_conflict', 'empty_selection', 'metadata_collision', 'invalid_export', 'export_verification_failed', 'unsupported_export_encoding', 'vlen_budget_exceeded') else 'invalid_h5ad'
         emit({'type': 'error', 'code': code})
     except (OSError, KeyError, TypeError):
         emit({'type': 'error', 'code': 'invalid_h5ad'})

@@ -1,0 +1,15 @@
+# Variable-length string allocation budget and category projection
+
+Protected HDF5 reads use an 8 MiB shared budget for live variable-length string payloads, including terminating NUL bytes. The transfer property list attaches a bounded allocator to the same HDF5 library used by the packaged h5py. The path covers scalar and one-dimensional string datasets, projected legacy compound string fields, selected annotation and index reads, and one-dimensional H5AD export. The code holds h5py's HDF5 lock during the native read.
+
+Annotation, dictionary, index and export loops split batches that exceed the budget while keeping source row order. A single value over the budget produces an English, Japanese or Simplified Chinese error. Explicit full-column compatibility access is subject to the per-read limit. Protected reads also retain their normal row limits. HDF5 internal buffers, disk cache and decoded Python objects are outside the native allocation budget, so process RSS can exceed 8 MiB. Multidimensional strings, non-string variable-length encodings and unusual AnnData compatibility decoders are separate remaining paths.
+
+Nullable integer, boolean and string categorical dictionaries now validate their masks and exact uniqueness in blocks, and only referenced labels are decoded for each row block. Legacy projected dictionaries are read and written in blocks, with category order and unused labels retained in the output. Unsupported category encodings continue through AnnData compatibility decoding.
+
+A fresh-process probe read 64 synthetic strings of 512 KiB each. Additional peak RSS was 75.4 MiB for the full h5py read and 34.4 MiB for the bounded path. The bounded path yielded eight ordered batches and produced the same decoded SHA-256 `85698127a1133a7fd74e24c28b44f595e1ef43bff522bf3d1e7079a2846d32d3`. This is an isolated read measurement.
+
+Regression tests cover scalar, plain and projected compound fields, UTF-8 byte lengths, batch splitting and recovery after a rejected read. Nullable categorical regressions include exact unsigned 64-bit values, boolean and Unicode labels, missing codes and rejection of a missing dictionary value. The legacy export regression uses a 300-label dictionary and compares the output with an independent AnnData decode. The prepared bundled Python runtime passed the allocator and nullable dictionary tests.
+
+On public Kang, QC retained 24,562 of 24,673 cells. Independent full AnnData readback matched all 12 original observation columns, the feature annotations and every retained expression value. The original retained SHA-256 `e6a5adac64dcdeb36eaba27db49b63e0c64bb0ed4a64c6705971506b41c39830`. The supervised worker restored the saved QC history after restart and wrote both QC ZIP and retained H5AD. Frontend build and 21 tests, Rust core's 23 tests and app compile check passed. Python ran 69 tests, with two PBMC-dependent cases skipped.
+
+The portable project integration also passed. It saved and restored the 12,859-cell mixed cohort and its donor lineage, reconnected the moved original by SHA-256 and re-exported the restored definition.

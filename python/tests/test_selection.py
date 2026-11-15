@@ -34,6 +34,69 @@ class SelectionTests(unittest.TestCase):
         data.write_h5ad(path)
         return path
 
+    def test_streamed_npz_matches_full_arrays_across_block_boundaries(self):
+        from unittest.mock import patch
+        from causalmed_worker.qc import QcArray
+
+        n = 8200
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / 'cells.h5ad'
+            names = ['duplicate'] * n
+            names[-1] = '細胞😀' * 30
+            donors = ['D'] * n
+            donors[-3:] = [None, ' ', '長いID']
+            matrix = np.tile([1, 4], (n, 1))
+            matrix[8191] = 0
+            data = ad.AnnData(matrix, obs=pd.DataFrame({'donor': donors}, index=names),
+                              var=pd.DataFrame(index=['MT-A', 'G1']))
+            data.write_h5ad(source)
+            options = {'donorColumn': 'donor', 'minGenes': 1, 'maxMitoPct': 10}
+            with patch.object(QcArray, 'materialize', side_effect=AssertionError('full array allocation')):
+                report = inspect(source, options=options, artifact_dir=root / 'run')
+            self.assertEqual(report['duplicateCellIds'], n - 2)
+
+            _, arrays = load_selection(root / 'run', report['selection'])
+            reasons = np.full(n, 32, dtype=np.uint8)
+            reasons[8191] = 3
+            mito = np.full(n, 20.0)
+            mito[8191] = np.nan
+            expected = {
+                'source_row': np.arange(n), 'cell_id': np.asarray(names, dtype=str),
+                'retained': reasons == 0, 'reason_bits': reasons,
+                'total_counts': matrix.sum(axis=1, dtype=float),
+                'detected_genes': (matrix > 0).sum(axis=1),
+                'mito_percent': mito,
+                'donor_id': np.asarray(['' if value is None else value for value in donors], dtype=str),
+                'donor_missing': np.asarray([not (value or '').strip() for value in donors]),
+            }
+            for key, values in expected.items():
+                self.assertEqual(arrays[key].dtype, values.dtype, key)
+                np.testing.assert_array_equal(arrays[key], values, err_msg=key)
+
+    def test_legacy_numpy_archive_opens_as_read_only_mapped_arrays(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = self.make_input(root)
+            artifact = root / 'run'
+            report = inspect(source, options={'donorColumn': 'subject', 'minGenes': 1}, artifact_dir=artifact)
+            manifest, arrays = load_selection(artifact, report['selection'])
+            old_values = {name: np.array(values) for name, values in arrays.items()}
+            np.savez_compressed(artifact / 'cells.npz', **old_values)
+            manifest['selectionSha256'] = file_digest(artifact / 'cells.npz')
+            manifest_path = artifact / 'manifest.json'
+            manifest_path.write_text(json.dumps(manifest), encoding='utf-8')
+            receipt = {**report['selection'], 'sha256': manifest['selectionSha256'],
+                       'manifestSha256': file_digest(manifest_path)}
+            _, mapped = load_selection(artifact, receipt)
+            for name, values in old_values.items():
+                self.assertIsInstance(mapped[name], np.memmap)
+                self.assertFalse(mapped[name].flags.writeable)
+                np.testing.assert_array_equal(mapped[name], values)
+            output = root / 'old-history.h5ad'
+            export_selection(source, artifact, output, receipt, 'export_h5ad')
+            self.assertEqual(list(ad.read_h5ad(output).obs_names), ['duplicate', 'c3'])
+
     def test_history_comparison_uses_cell_identity_and_rejects_tampering(self):
         with tempfile.TemporaryDirectory() as directory:
             source = self.make_input(directory)

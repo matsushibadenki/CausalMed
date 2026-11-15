@@ -3,11 +3,52 @@ import hashlib
 import json
 from pathlib import Path
 
+if 'open_research_h5ad' not in globals():
+    from causalmed_worker.backed import open_research_h5ad, iter_frame_index, iter_annotation_column, index_matches
+
+
+def match_feature_space(frame, column, target, row):
+    """Match in source order and hash the historical sorted JSON representation."""
+    import sqlite3
+    from contextlib import closing
+
+    blocks = iter_frame_index(frame) if column == '_index' else iter_annotation_column(frame, column, include_index=False)
+    position = None
+    count = matched = 0
+    invalid = False
+    with closing(sqlite3.connect('')) as database:
+        database.execute('PRAGMA cache_size=-1024')
+        database.execute('CREATE TABLE features (id TEXT PRIMARY KEY) WITHOUT ROWID')
+        for start, block in blocks:
+            identifiers = block.astype('string')
+            for offset, identifier in enumerate(identifiers):
+                if not isinstance(identifier, str) or not identifier.strip():
+                    invalid = True
+                if isinstance(identifier, str) and identifier == target:
+                    position = start + offset
+                    matched += 1
+            count += len(identifiers)
+            database.executemany('INSERT OR IGNORE INTO features VALUES (?)',
+                                 ((value,) for value in identifiers if isinstance(value, str)))
+        row['matchedFeatures'] = matched
+        row['featureCount'] = count
+        if matched != 1:
+            raise ValueError('feature_missing' if not matched else 'feature_ambiguous')
+        if invalid or database.execute('SELECT count(*) FROM features').fetchone()[0] != count:
+            raise ValueError('feature_space_invalid')
+        digest = hashlib.sha256(b'[')
+        separator = b''
+        for (identifier,) in database.execute('SELECT id FROM features ORDER BY id COLLATE BINARY'):
+            digest.update(separator)
+            digest.update(json.dumps(identifier, ensure_ascii=False).encode('utf-8'))
+            separator = b','
+        digest.update(b']')
+        row['featureSpaceSha256'] = digest.hexdigest()
+    return position
+
 
 def inspect_outcome(context, context_sha, jobs, progress=lambda p, s: None):
-    import anndata
     import numpy as np
-    import pandas as pd
     from scipy import sparse
     if 'load_selection' not in globals():
         from causalmed_worker.selection import load_selection, file_digest
@@ -46,8 +87,8 @@ def inspect_outcome(context, context_sha, jobs, progress=lambda p, s: None):
                 raise ValueError('selection_changed') from None
             if manifest['analysisId'] != obs['qcId'] or manifest['source']['sha256'] != source['sourceSha256'] or job['selection']['manifestSha256'] != obs['manifestSha256']:
                 raise ValueError('selection_changed')
-            data = anndata.read_h5ad(path, backed='r')
-            if not np.array_equal(np.asarray(data.obs_names, dtype=str), arrays['cell_id']):
+            data = open_research_h5ad(path)
+            if not index_matches(data.obs, arrays['cell_id']):
                 raise ValueError('selection_changed')
             key = manifest['qc']['options']['matrix']
             row['matrix'] = key
@@ -59,16 +100,7 @@ def inspect_outcome(context, context_sha, jobs, progress=lambda p, s: None):
             matrix = sparse_dataset(node) if isinstance(node, h5py.Group) else node
             var = data.raw.var if key == 'raw' else data.var
             column = context['spec']['featureColumn']
-            identifiers = pd.Series(var.index, dtype='string') if column == '_index' else var[column].astype('string')
-            target = context['spec']['featureId']
-            matches = np.flatnonzero(identifiers.eq(target).fillna(False).to_numpy(dtype=bool))
-            row['matchedFeatures'] = len(matches)
-            row['featureCount'] = len(identifiers)
-            if len(matches) != 1:
-                raise ValueError('feature_missing' if not len(matches) else 'feature_ambiguous')
-            if identifiers.isna().any() or identifiers.str.strip().eq('').any() or identifiers.duplicated().any():
-                raise ValueError('feature_space_invalid')
-            row['featureSpaceSha256'] = hashlib.sha256(json.dumps(sorted(identifiers.tolist()), ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
+            feature_position = match_feature_space(var, column, context['spec']['featureId'], row)
             kept = np.asarray(arrays['retained'], dtype=bool)
             if int(kept.sum()) != obs['retained'] or int((kept & arrays['donor_missing']).sum()) != obs['missingRetained']:
                 raise ValueError('selection_changed')
@@ -83,7 +115,7 @@ def inspect_outcome(context, context_sha, jobs, progress=lambda p, s: None):
                 mask = kept[start:end]
                 if not mask.any():
                     continue
-                values = matrix[start:end, int(matches[0]):int(matches[0])+1]
+                values = matrix[start:end, feature_position:feature_position + 1]
                 values = values.toarray() if sparse.issparse(values) else np.asarray(values)
                 values = values.reshape(-1)[mask].astype(np.float64)
                 totals = arrays['total_counts'][start:end][mask]
