@@ -1,0 +1,9 @@
+# Special HDF5 metadata copy
+
+H5AD export now copies flat compound datasets in tiles, including records that combine fixed-width fields, variable-length text and variable-length numeric sequences. It reads projected fields and reconstructs each tile with the original dtype and field order. The 8 MiB native payload budget is shared across variable-length fields in a tile. Oversized tiles are split, and a single oversized record produces the existing budget error.
+
+Plain object and region reference datasets copied across files use HDF5's default null-reference representation without reading source reference payloads. Plain reference attributes use that representation too. Ordinary attributes retain their dtype and value and are copied one at a time. Attribute values still use whole-value HDF5 reads. Nested variable-length compound types and other unsupported object encodings retain the compatibility copy. The byte budget covers native variable-length payloads, while Python values and HDF5 internal buffers also contribute to peak memory.
+
+Regression coverage compares mixed compound values and attributes, forces a tile to split and a single record to exceed a test budget, and compares object and region references with default cross-file HDF5 copy.
+
+A temporary copy of the public Kang-derived H5AD included 700 compound records with UTF-8 and variable-length integers, an attribute, and an object reference dataset. QC retained 12,729 cells. Independent HDF5 readback verified cell IDs, expression values, compound fields, the attribute, null references and the input checksum. The portable project integration restored and re-exported the 12,859-cell public Kang definition after SHA-256 source reconnection. Frontend build and 21 tests, Rust core 23 tests, and app compile check passed. Python ran 72 tests with two PBMC-dependent skips.

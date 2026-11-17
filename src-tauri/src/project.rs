@@ -886,7 +886,7 @@ mod tests {
         )
         .unwrap();
         let worker = Worker::new(root.path());
-        worker.reserve(120).unwrap();
+        worker.reserve(600).unwrap();
         worker.run_analysis(
             &crate::h5ad::python_path(),
             crate::h5ad::worker_script(),
@@ -904,7 +904,7 @@ mod tests {
         let indexed = crate::browse::history(&worker, &scope, &Default::default()).unwrap();
         assert_eq!(indexed.total, 1);
         assert!(root.path().join("history-search.sqlite3").exists());
-        worker.reserve(120).unwrap();
+        worker.reserve(600).unwrap();
         worker.run_analysis(
             &crate::h5ad::python_path(),
             crate::h5ad::worker_script(),
@@ -983,6 +983,24 @@ mod tests {
             0
         );
 
+        let initial_output = root.path().join("before-restore.h5ad");
+        let initial_source = worker.export_source(id).unwrap();
+        worker.reserve(600).unwrap();
+        worker.run_export(
+            &crate::h5ad::python_path(),
+            crate::h5ad::worker_script(),
+            initial_source,
+            &initial_output,
+            "export_h5ad",
+        );
+        assert_eq!(
+            worker.snapshot().status,
+            "completed",
+            "{:?}",
+            worker.snapshot().error
+        );
+        assert_eq!(worker.snapshot().last_export.unwrap()["retained"], 24562);
+
         let stage = stage_save(root.path(), &doc, &worker).unwrap();
         let package = root.path().join("real.causalmed");
         save(stage.path(), &package).unwrap();
@@ -1025,7 +1043,7 @@ mod tests {
         let wrong = root.path().join("wrong.h5ad");
         fs::write(&wrong, b"not the original").unwrap();
         let sha = restored_worker.relink_sha(id).unwrap();
-        restored_worker.reserve(120).unwrap();
+        restored_worker.reserve(600).unwrap();
         restored_worker.run_relink(
             &crate::h5ad::python_path(),
             crate::h5ad::worker_script(),
@@ -1037,7 +1055,7 @@ mod tests {
             Some("file_changed")
         );
         assert!(!restored_worker.snapshot().source_linked);
-        restored_worker.reserve(120).unwrap();
+        restored_worker.reserve(600).unwrap();
         restored_worker.run_relink(
             &crate::h5ad::python_path(),
             crate::h5ad::worker_script(),
@@ -1045,7 +1063,7 @@ mod tests {
             &sha,
         );
         assert!(restored_worker.snapshot().source_linked);
-        restored_worker.reserve(120).unwrap();
+        restored_worker.reserve(600).unwrap();
         restored_worker.run_relink(
             &crate::h5ad::python_path(),
             crate::h5ad::worker_script(),
@@ -1071,7 +1089,7 @@ mod tests {
         }
         let output = root.path().join("past.h5ad");
         let source = restarted.export_source(id).unwrap();
-        restarted.reserve(120).unwrap();
+        restarted.reserve(600).unwrap();
         restarted.run_export(
             &crate::h5ad::python_path(),
             crate::h5ad::worker_script(),
@@ -1082,7 +1100,30 @@ mod tests {
         assert_eq!(restarted.snapshot().status, "completed");
         assert_eq!(restarted.snapshot().last_export.unwrap()["retained"], 24562);
         assert_eq!(digest(&moved).unwrap(), sha);
-        let verify=std::process::Command::new(crate::h5ad::python_path()).args(["-c","import anndata as a,numpy as n,json,sys; s=a.read_h5ad(sys.argv[1]); o=a.read_h5ad(sys.argv[2]); z=n.load(sys.argv[3],allow_pickle=False); m=z['retained']; assert o.shape==(24562,15706); assert (o.X!=s.X[m]).nnz==0; assert list(o.obs_names)==list(s.obs_names[m]); assert list(o.obs['replicate'])==list(s.obs['replicate'].iloc[n.flatnonzero(m)]); assert o.obs['replicate'].nunique()==8"]).arg(&moved).arg(&output).arg(restored.path().join("qc-runs").join(id).join("cells.npz")).output().unwrap();
+        let verify = std::process::Command::new(crate::h5ad::python_path())
+            .args(["-c", r#"
+import sys, anndata as ad, numpy as np, pandas as pd
+source, first, restored = (ad.read_h5ad(path) for path in sys.argv[1:4])
+with np.load(sys.argv[4], allow_pickle=False) as original_qc, np.load(sys.argv[5], allow_pickle=False) as restored_qc:
+    assert set(original_qc.files) == set(restored_qc.files)
+    for key in original_qc.files:
+        np.testing.assert_array_equal(original_qc[key], restored_qc[key])
+    retained = restored_qc['retained']
+    assert restored.shape == (24562, 15706)
+    assert (restored.X != source.X[retained]).nnz == 0
+    assert (restored.X != first.X).nnz == 0
+    pd.testing.assert_frame_equal(restored.obs, first.obs)
+    pd.testing.assert_frame_equal(restored.var, first.var)
+    assert restored.obs_names.equals(source.obs_names[retained])
+    assert list(restored.obs['replicate']) == list(source.obs['replicate'].iloc[np.flatnonzero(retained)])
+    assert restored.obs['replicate'].nunique() == 8
+"#])
+            .arg(&moved)
+            .arg(&initial_output)
+            .arg(&output)
+            .arg(root.path().join("qc-runs").join(id).join("cells.npz"))
+            .arg(restored.path().join("qc-runs").join(id).join("cells.npz"))
+            .output().unwrap();
         assert!(
             verify.status.success(),
             "{}",

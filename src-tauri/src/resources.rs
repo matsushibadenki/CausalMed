@@ -1,4 +1,4 @@
-//! Per-project, machine-local worker budgets. RSS is sampled, not an allocator cap.
+//! Per-project worker budgets and live resident-memory and CPU telemetry.
 use serde::{Deserialize, Serialize};
 use std::{io::Write, path::Path, process::Command};
 
@@ -171,6 +171,10 @@ pub fn configure(command: &mut Command, limits: &Limits) -> Result<(), String> {
     if !supported() {
         return Err("resource_monitor_unsupported".into());
     }
+    command.env(
+        "CAUSALMED_WORKER_MEMORY_BYTES",
+        (limits.memory_mib * 1024 * 1024).to_string(),
+    );
     for key in [
         "OMP_NUM_THREADS",
         "OPENBLAS_NUM_THREADS",

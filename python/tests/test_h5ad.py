@@ -18,6 +18,31 @@ except ImportError:
 from causalmed_worker.h5ad import inspect
 
 
+@unittest.skipUnless(sys.platform in ('darwin', 'linux'), 'Requires RLIMIT_AS')
+class WorkerMemoryTests(unittest.TestCase):
+    def test_kernel_denies_mapping_before_it_becomes_resident(self):
+        code = """
+import mmap
+from causalmed_worker import h5ad
+
+def native_allocation(*args):
+    # Reserve address space without accessing any pages. An RSS watchdog
+    # cannot observe this request as resident memory.
+    with mmap.mmap(-1, 1024 * 1024 * 1024):
+        raise AssertionError('kernel allowed an over-budget mapping')
+
+h5ad.inspect = native_allocation
+raise SystemExit(h5ad.main())
+"""
+        output = subprocess.run(
+            [sys.executable, '-c', code, 'unused.h5ad'],
+            env={**os.environ, 'CAUSALMED_WORKER_MEMORY_BYTES': str(128 * 1024 * 1024)},
+            capture_output=True, text=True, timeout=15,
+        )
+        self.assertEqual(output.returncode, 1, output.stderr)
+        self.assertEqual(json.loads(output.stdout), {'type': 'error', 'code': 'worker_memory_limit'})
+
+
 @unittest.skipIf(ad is None, 'Install python/requirements.txt for H5AD tests')
 class H5adTests(unittest.TestCase):
     def test_real_hdf5_dense_and_sparse_annotations_and_missing(self):

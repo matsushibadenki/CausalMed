@@ -1,6 +1,6 @@
 # CausalMed roadmap
 
-Updated: 2026-11-15. The first research context is IPF. Public PBMC data verifies software behavior; biological and predictive validation remains separate.
+Updated: 2026-11-17. The first research context is IPF. Public PBMC data verifies software behavior; biological and predictive validation remains separate.
 
 Status notation:
 
@@ -45,7 +45,7 @@ Status notation:
 6. 🟢 [Done] Per-project worker budgets, live sampled RSS/CPU meters, kernel CPU fallback, numerical-library thread requests, explicit stop reasons and safe retry; real Kang import/export and native UI verified.
 7. 🟢 [Done] Bundle pinned Python/dependencies for Apple-silicon macOS 14+, isolated execution without development fallback, full build inventory/audit, relocated-app real-H5AD ingestion/QC/export and resource-stop/retry verification.
 8. 🟢 [Done] Multi-value cohort selection with searchable counted checkboxes, frozen OR/AND rules, compatible historical digests, portable restore and mixed-annotation eligibility abstention.
-9. 🟠 [Next] Bound annotation memory, strict OS memory containment, signed/notarized clean-machine distribution and additional runtime targets.
+9. 🟠 [Next] Reduce remaining annotation memory, validate the worker limits on Linux, and verify signed/notarized clean-machine distribution and additional runtime targets.
 10. 🔴 [Later] Multivariate evaluation after validated dataset/donor/perturbation mappings; encryption and full GPU exploration remain subsequent increments.
 
 ## Closest next increments
@@ -86,7 +86,15 @@ Status notation:
 - 🟢 [Done] Decode oversized backed CSC blocks with multiple columns, unsorted indices or duplicates through disk-backed ordering and bounded CSR tiles. Preserve duplicate arithmetic and the QC artifact format. [Validation](OVERSIZED_CSC_VALIDATION.md).
 - 🟢 [Done] Project legacy compound annotation fields and indices in blocks for QC and H5AD export. Bound variable-length text reads by element count in annotation paths. [Validation](LEGACY_VLEN_VALIDATION.md).
 - 🟢 [Done] Limit HDF5 variable-length string payload allocations to 8 MiB per protected read, split oversized batches, and project nullable and legacy category dictionaries. [Validation](VLEN_BYTE_BUDGET_VALIDATION.md).
-- 🟠 [Next] Bound additional variable-length encodings, multidimensional HDF5 reads and remaining unusual compatibility paths. Add strict OS memory containment. Sampled RSS thresholds and numeric block budgets are not instantaneous allocation caps.
+- 🟢 [Done] Tile multidimensional variable-length text during H5AD export. Apply the 8 MiB native text allocation budget and split oversized tiles while preserving row and column order.
+- 🟢 [Done] Apply the native byte budget to variable-length numeric sequences and copy ordinary HDF5 metadata datasets in bounded tiles. [Validation](HDF5_METADATA_COPY_VALIDATION.md).
+- 🟢 [Done] Tile flat compound metadata with a shared variable-length payload budget and avoid reading plain cross-file reference datasets to produce their existing null-reference representation. [Validation](HDF5_SPECIAL_COPY_VALIDATION.md).
+- 🟢 [Done] Project nested compound fields under the shared variable-length budget and transfer large fixed-width HDF5 attributes through temporary mappings. [Validation](HDF5_NESTED_COPY_VALIDATION.md).
+- 🟢 [Done] Transfer variable-length metadata attributes without Python decoding and project variable-length leaves inside HDF5 array members under the shared tile budget. [Validation](HDF5_VLEN_ATTRIBUTE_ARRAY_VALIDATION.md).
+- 🟢 [Done] Reduce HDF5 metadata cache usage during native VLEN attribute transfer and tile compound datasets with isolated reference fields. [Validation](HDF5_REFERENCE_CACHE_VALIDATION.md).
+- 🟢 [Done] Pack padded compound attribute staging records and tile datasets whose nested fields mix reference tokens and variable-length payloads. Preserve attribute datatypes and existing HDF5 reference tokens. [Validation](HDF5_MIXED_NATIVE_COPY_VALIDATION.md).
+- 🟢 [Done] Apply per-worker kernel address-space limits to whole-value VLEN attributes and compatibility copies. Check the OS-reported peak RSS before publishing and retain committed work on failure. [Validation](WORKER_MEMORY_LIMIT_VALIDATION.md).
+- ⭕️ [Pending] Run the Linux worker address-space limit and real-H5AD resource regressions in a Linux runtime. Windows process accounting remains pending.
 - 🔴 [Later] Connect validated dataset/donor/perturbation mappings to multivariate M0/M1 evaluation with confidence intervals, calibration, and abstention rules.
 - 🟢 [Done] Reproducible bundled macOS worker: fixed Python/wheel hashes, offline verified cache, app resource selection without `.venv`/system fallback, runtime indicator, and relocated/isolated public-H5AD checks. See [bundled worker validation](BUNDLED_WORKER_VALIDATION.md).
 - 🟠 [Next] Additional runtime targets; validate Linux monitoring and implement Windows process accounting.
@@ -113,7 +121,7 @@ Status notation:
 
 ## Verification records
 
-See [H5AD validation](H5AD_VALIDATION.md), [QC and donor validation](QC_VALIDATION.md), [selection/export validation](EXPORT_VALIDATION.md), [architecture](ARCHITECTURE.md), and [UI design](UI.md). See also [browse validation](BROWSE_VALIDATION.md), [search index validation](SEARCH_INDEX_VALIDATION.md), [trash validation](TRASH_VALIDATION.md), [portable trash validation](PORTABLE_TRASH_VALIDATION.md), [bulk validation](BULK_VALIDATION.md), [stream export validation](STREAM_EXPORT_VALIDATION.md), [real-outcome validation](REAL_OUTCOME_VALIDATION.md), [worker resource validation](WORKER_RESOURCE_VALIDATION.md), and [bundled worker validation](BUNDLED_WORKER_VALIDATION.md). Current automated coverage: Rust core 23 tests, Rust app 46 tests including opt-in public-file integration, frontend 21 tests, and Python 69 tests including opt-in public raw/donor datasets. Public-file tests require the documented local files and Python environment.
+See [H5AD validation](H5AD_VALIDATION.md), [QC and donor validation](QC_VALIDATION.md), [selection/export validation](EXPORT_VALIDATION.md), [architecture](ARCHITECTURE.md), and [UI design](UI.md). See also [browse validation](BROWSE_VALIDATION.md), [search index validation](SEARCH_INDEX_VALIDATION.md), [trash validation](TRASH_VALIDATION.md), [portable trash validation](PORTABLE_TRASH_VALIDATION.md), [bulk validation](BULK_VALIDATION.md), [stream export validation](STREAM_EXPORT_VALIDATION.md), [real-outcome validation](REAL_OUTCOME_VALIDATION.md), [worker resource validation](WORKER_RESOURCE_VALIDATION.md), and [bundled worker validation](BUNDLED_WORKER_VALIDATION.md). Current automated coverage: Rust core 23 tests, Rust app 46 tests including opt-in public-file integration, frontend 21 tests, and Python 75 tests including opt-in public raw/donor datasets. Public-file tests require the documented local files and Python environment.
 
 ## Development housekeeping
 

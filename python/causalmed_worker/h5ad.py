@@ -1,7 +1,9 @@
 """H5AD metadata worker. NDJSON stdout is a bounded progress/result protocol."""
 from importlib.metadata import version
+import errno
 import hashlib
 import json
+import os
 from pathlib import Path
 import sys
 
@@ -107,8 +109,71 @@ if 'inspect_outcome' not in globals():
     from causalmed_worker.outcome import inspect_outcome
 
 
-def main():
+def install_worker_memory_limit():
+    """Cap mappings before importing the native scientific dependencies."""
+    configured = os.environ.get('CAUSALMED_WORKER_MEMORY_BYTES')
+    if configured is None:
+        return None
+    import resource
+
+    ceiling = int(configured)
+    address_space = ceiling
+    if sys.platform == 'darwin':
+        import ctypes
+
+        # TASK_VM_INFO starts with virtual_size. Darwin charges large pre-existing
+        # shared-cache and allocator reservations to this value.
+        kernel = ctypes.CDLL(None)
+        task = ctypes.c_uint.in_dll(kernel, 'mach_task_self_')
+        info = (ctypes.c_uint64 * 128)()
+        count = ctypes.c_uint(ctypes.sizeof(info) // ctypes.sizeof(ctypes.c_uint))
+        task_vm_info = 22
+        if kernel.task_info(task, task_vm_info, ctypes.byref(info), ctypes.byref(count)) or count.value < 2:
+            raise ValueError('resource_setup_failed')
+        address_space += info[0]
     try:
+        for inherited in resource.getrlimit(resource.RLIMIT_AS):
+            if inherited != resource.RLIM_INFINITY:
+                address_space = min(address_space, inherited)
+        resource.setrlimit(resource.RLIMIT_AS, (address_space, address_space))
+    except (OSError, ValueError) as error:
+        raise ValueError('resource_setup_failed') from error
+    return ceiling
+
+
+def assert_worker_peak(ceiling):
+    if ceiling is not None:
+        import resource
+
+        peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        if peak * (1 if sys.platform == 'darwin' else 1024) > ceiling:
+            raise MemoryError
+
+
+def is_worker_allocation_failure(error):
+    if isinstance(error, MemoryError) or getattr(error, 'errno', None) == errno.ENOMEM:
+        return True
+    # h5py translates native HDF5 failures into Python exceptions with stack text.
+    message = str(error).lower()
+    # Linux's dynamic loader can hide ENOMEM behind the extension import error.
+    if sys.platform == 'linux' and isinstance(error, ImportError):
+        if 'failed to map segment from shared object' in message:
+            return True
+    return any(fragment in message for fragment in (
+        'memory allocation failed', "can't allocate memory", 'unable to allocate memory',
+        'cannot allocate memory', 'failed to allocate memory', 'out of memory',
+    ))
+
+
+def main():
+    ceiling = None
+    try:
+        ceiling = install_worker_memory_limit()
+
+        def result(kind, report):
+            assert_worker_peak(ceiling)
+            emit({'type': kind, 'report': report})
+
         job = json.loads(sys.argv[4]) if len(sys.argv) > 4 else {}
         progress = lambda percent, phase: emit({'type': 'progress', 'percent': percent, 'phase': phase})
         if job.get('operation') == 'relink':
@@ -122,27 +187,40 @@ def main():
             after = path.stat()
             if digest.hexdigest() != job['sha256'] or (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
                 raise ValueError('file_changed')
-            emit({'type': 'result', 'report': {'sha256': digest.hexdigest()}})
+            result('result', {'sha256': digest.hexdigest()})
         elif job.get('operation') == 'inspect_outcome':
-            emit({'type': 'result', 'report': inspect_outcome(job['context'], job['contextSha256'], job['inputs'], progress)})
+            result('result', inspect_outcome(job['context'], job['contextSha256'], job['inputs'], progress))
         elif job.get('operation') == 'compare':
-            emit({'type': 'result', 'report': compare_selections(job['leftDir'], job['left'], job['rightDir'], job['right'])})
+            result('result', compare_selections(job['leftDir'], job['left'], job['rightDir'], job['right']))
         elif job.get('operation', '').startswith('export_'):
             receipt = export_selection(sys.argv[1], job['selectionDir'], job['output'], job['selection'], job['operation'], progress, job.get('definition'))
-            emit({'type': 'export_result', 'report': receipt})
+            result('export_result', receipt)
         else:
             report = inspect(sys.argv[1], progress, json.loads(sys.argv[2]) if len(sys.argv) > 2 else None, sys.argv[3] if len(sys.argv) > 3 else None, job.get('artifactDir'))
-            emit({'type': 'result', 'report': report})
+            result('result', report)
         return 0
-    except ModuleNotFoundError:
-        emit({'type': 'error', 'code': 'python_dependencies_missing'})
-    except ValueError as error:
-        code = str(error) if str(error) in ('invalid_qc_options', 'invalid_donor_column', 'invalid_gene_column', 'invalid_matrix', 'file_changed', 'selection_changed', 'source_conflict', 'empty_selection', 'metadata_collision', 'invalid_export', 'export_verification_failed', 'unsupported_export_encoding', 'vlen_budget_exceeded') else 'invalid_h5ad'
+    except Exception as error:
+        try:
+            assert_worker_peak(ceiling)
+            memory_failure = ceiling is not None and is_worker_allocation_failure(error)
+        except MemoryError:
+            memory_failure = True
+        if memory_failure:
+            code = 'worker_memory_limit'
+        elif isinstance(error, ModuleNotFoundError):
+            code = 'python_dependencies_missing'
+        elif isinstance(error, ValueError):
+            code = str(error) if str(error) in (
+                'invalid_qc_options', 'invalid_donor_column', 'invalid_gene_column', 'invalid_matrix',
+                'file_changed', 'selection_changed', 'source_conflict', 'empty_selection',
+                'metadata_collision', 'invalid_export', 'export_verification_failed',
+                'unsupported_export_encoding', 'vlen_budget_exceeded', 'resource_setup_failed',
+            ) else 'invalid_h5ad'
+        elif isinstance(error, (OSError, KeyError, TypeError)):
+            code = 'invalid_h5ad'
+        else:
+            code = 'worker_failed'
         emit({'type': 'error', 'code': code})
-    except (OSError, KeyError, TypeError):
-        emit({'type': 'error', 'code': 'invalid_h5ad'})
-    except Exception:
-        emit({'type': 'error', 'code': 'worker_failed'})
     return 1
 
 

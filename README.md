@@ -12,7 +12,7 @@ Native macOS app shown in Japanese; English and Simplified Chinese are also supp
 
 ![Bundled Python runtime and a memory-budget stop](docs/images/bundled-worker-runtime.jpg)
 
-The app carries its own Python 3.12.16 runtime. Resource-budget stops preserve the last successful QC result; memory is a sampled stop threshold, not an instantaneous allocation cap.
+The app carries its own Python 3.12.16 runtime. A per-worker address-space limit and resident-memory monitoring protect the last successful QC result on resource stops.
 
 ![Expression QC and eight original donor groups from public Kang data](docs/images/bundled-worker-qc.jpg)
 
@@ -157,7 +157,7 @@ Histograms aggregate all cells into 32 bins. Count and gene axes use `log10(1 + 
 
 Donor mapping is explicit. Choose the annotation column containing biological donor identity; do not substitute cell type, cluster, batch, or a per-cell barcode. Missing and blank IDs remain missing. Stored labels are preserved rather than silently merged or renamed. Per-donor bars compare total cells with QC-retained candidates. Mapping does not establish that donor identity is correct or that donors are independent; it also does not make the dataset eligible for the separate M0 evaluator.
 
-The worker reads expression values in chunks and returns bounded aggregate summaries. Expression matrices, per-cell QC vectors, and frame buffers do not cross the Rust–JavaScript boundary. AnnData can still load annotations and ancillary metadata into Python memory. The worker resource panel adds a sampled resident-memory watchdog and CPU budget; the watchdog is not a hard instantaneous allocator limit.
+The worker reads expression values in chunks and returns bounded aggregate summaries. Expression matrices, per-cell QC vectors, and frame buffers do not cross the Rust–JavaScript boundary. AnnData can still load annotations and ancillary metadata into Python memory. Worker resource settings control address-space growth, resident memory and CPU time.
 
 ## Saving QC decisions and exporting cells
 
@@ -176,13 +176,13 @@ Existing pre-selection QC reports remain readable. Run QC once to create an expo
 
 ## Worker lifecycle and storage
 
-The **Worker resources** panel in Datasets and Benchmark controls each local project's supervised Python jobs: a memory stop threshold (64–65,536 MiB), cumulative CPU budget (1–3,600 seconds), and requested BLAS/OpenMP compute threads (1–8). Defaults are 2,048 MiB, 300 CPU seconds and two compute threads. Resident memory, sampled peak and CPU usage are displayed with budget meters. Expand the budget control to edit; active jobs lock their settings. Revision checks prevent one window from overwriting another window's edits.
+The **Worker resources** panel in Datasets and Benchmark controls each local project's supervised Python jobs: a memory budget (64–65,536 MiB), cumulative CPU budget (1–3,600 seconds), and requested BLAS/OpenMP compute threads (1–8). Defaults are 2,048 MiB, 300 CPU seconds and two compute threads. Resident memory, sampled peak and CPU usage are displayed with budget meters. Expand the budget control to edit; active jobs lock their settings. Revision checks prevent one window from overwriting another window's edits.
 
 Rust samples the Python process approximately every 50 ms, terminates and reaps it when observed resident memory or cumulative CPU exceeds the configured budget, and reports the specific reason. CPU time sums process threads and differs from wall time. A kernel CPU limit provides a fallback with a short grace period; compute-thread environment variables are set before Python starts. These are requests to supported numerical libraries, not an OS thread-count limit. A monitoring failure stops the process rather than continuing without observation.
 
-The RSS watchdog is **not an instantaneous memory-allocation cap or process-tree sandbox**: short peaks may exceed the threshold before sampling, and descendant-process memory is not aggregated. Annotations and library/HDF5 overhead still use memory. macOS monitoring has real-H5AD and native UI checks; Linux monitoring code requires separate validation. Platforms without supported monitoring explicitly withhold worker execution. On resource failure, prior QC/outcome results remain selected, pending selection directories are discarded, and staged exports are removed without publishing a destination. Increase the budget or reduce the input and retry.
+Before importing scientific libraries, the worker installs a kernel address-space limit. Linux applies the budget to total virtual address space. macOS adds the budget to the interpreter’s startup address space to account for pre-existing mappings. Whole-value HDF5 reads and compatibility copies run under this limit. The worker also checks the OS-recorded peak resident memory before returning a successful result. Existing virtual mappings can become resident without increasing address space, so the live RSS watchdog and final peak check still matter. The budget applies to the worker process. On resource failure, prior QC and outcome results remain selected, pending selection directories are discarded, and staged exports are removed. See [worker memory-limit validation](docs/WORKER_MEMORY_LIMIT_VALIDATION.md).
 
-Budgets are Rust-owned, saved atomically per local project in `worker-settings.json`, and restored on restart/project switch. They are machine-local execution preferences, not scientific attestations; portable project packages intentionally omit them and use safe defaults after restoration. Live usage is session-only. Corrupt saved settings show a warning and use validated defaults until repaired by saving. See [worker resource validation](docs/WORKER_RESOURCE_VALIDATION.md). The Apple-silicon macOS runtime is bundled and verified with real H5AD data. Strict OS memory containment, other runtime targets, signing/notarization and clean-machine installation remain unfinished.
+Budgets are Rust-owned, saved atomically per local project in `worker-settings.json`, and restored on restart/project switch. They are machine-local execution preferences, not scientific attestations; portable project packages intentionally omit them and use safe defaults after restoration. Live usage is session-only. Corrupt saved settings show a warning and use validated defaults until repaired by saving. See [worker resource validation](docs/WORKER_RESOURCE_VALIDATION.md). The Apple-silicon macOS runtime is bundled and verified with real H5AD data. Linux runtime validation, additional runtime targets, signing and notarization, and clean-machine installation remain pending.
 
 The default deadline is 120 seconds and excludes time spent in the file picker. Progress shows runtime initialization, hashing, H5AD opening, annotation processing, expression QC, and validation. Progress percentages represent processing stages, not a prediction of remaining time.
 

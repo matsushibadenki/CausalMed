@@ -134,7 +134,7 @@ class BackedTests(unittest.TestCase):
                 projection.file.close()
 
     def test_vlen_allocation_budget_applies_to_plain_and_compound_reads(self):
-        from causalmed_worker.backed import read_bounded_strings, split_vlen_batch
+        from causalmed_worker.backed import read_bounded_vlen, split_vlen_batch
         with tempfile.TemporaryDirectory() as directory:
             with h5py.File(Path(directory) / 'vlen.h5', 'w') as handle:
                 dtype = h5py.string_dtype('utf-8')
@@ -146,21 +146,21 @@ class BackedTests(unittest.TestCase):
                 for node, kwargs in [(plain, {}), (compound, {'field': 'text'})]:
                     with self.subTest(node=node.name):
                         with self.assertRaisesRegex(ValueError, 'vlen_budget_exceeded'):
-                            read_bounded_strings(node, slice(None), byte_limit=100, **kwargs)
+                            read_bounded_vlen(node, slice(None), byte_limit=100, **kwargs)
                         np.testing.assert_array_equal(
-                            read_bounded_strings(node, np.array([0, 2]), byte_limit=100, **kwargs),
+                            read_bounded_vlen(node, np.array([0, 2]), byte_limit=100, **kwargs),
                             [values[0], values[2]],
                         )
                 batches = list(split_vlen_batch(
-                    0, 3, lambda start, stop: read_bounded_strings(
+                    0, 3, lambda start, stop: read_bounded_vlen(
                         plain, slice(start, stop), byte_limit=100
                     )
                 ))
                 self.assertEqual([offset for offset, _ in batches], [0, 1])
                 np.testing.assert_array_equal(np.concatenate([block for _, block in batches]), values)
                 with self.assertRaisesRegex(ValueError, 'vlen_budget_exceeded'):
-                    read_bounded_strings(scalar, (), byte_limit=80)
-                self.assertEqual(read_bounded_strings(scalar, (), byte_limit=81), values[1])
+                    read_bounded_vlen(scalar, (), byte_limit=80)
+                self.assertEqual(read_bounded_vlen(scalar, (), byte_limit=81), values[1])
 
     def test_nullable_category_dictionaries_project_preserve_values_and_reject_missing(self):
         from causalmed_worker.backed import annotation_group, iter_annotation_column
@@ -346,6 +346,9 @@ class BackedTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'synthetic.h5ad'
             ad.AnnData(np.ones((2,2))).write_h5ad(path)
-            result = subprocess.run([sys.executable, '-I', '-c', source, str(path)], capture_output=True, text=True)
+            result = subprocess.run(
+                [sys.executable, '-I', '-B', '-u', '-', str(path)], input=source,
+                capture_output=True, text=True,
+            )
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
             self.assertEqual(json.loads(result.stdout.splitlines()[-1])['type'], 'result')

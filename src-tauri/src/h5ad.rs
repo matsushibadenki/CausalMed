@@ -2,7 +2,7 @@ use crate::resources;
 use serde::Serialize;
 use serde_json::Value;
 use std::{
-    io::{BufRead, BufReader, Read},
+    io::{self, BufRead, BufReader, Read, Seek, Write},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{mpsc, Mutex},
@@ -166,7 +166,7 @@ impl Worker {
     pub fn run_relink(&self, python: &Path, script: &str, source: &Path, sha256: &str) {
         self.inner.lock().unwrap().snapshot.operation = "relink".into();
         let job = serde_json::json!({"operation":"relink","sha256":sha256});
-        self.run_command_from(
+        self.run_worker_command(
             worker_command(python, script, source, &serde_json::json!({}), "", &job),
             RunOutput::Relink {
                 source: source.into(),
@@ -299,7 +299,7 @@ impl Worker {
         };
         let job = serde_json::json!({"artifactDir": artifacts.path()});
         let command = worker_command(python, script, path, options, sha, &job);
-        self.run_command_from(
+        self.run_worker_command(
             command,
             RunOutput::Analysis {
                 source: Some(path.to_path_buf()),
@@ -502,7 +502,7 @@ impl Worker {
             inner.snapshot.operation = "compare".into();
         }
         let job = serde_json::json!({"operation":"compare","leftDir":a.directory,"left":a.selection,"rightDir":b.directory,"right":b.selection});
-        self.run_command_from(
+        self.run_worker_command(
             worker_command(python, script, &a.source, &serde_json::json!({}), "", &job),
             RunOutput::Compare {
                 left_id: a.selection["id"].as_str().unwrap().into(),
@@ -526,7 +526,7 @@ impl Worker {
             "",
             &job,
         );
-        self.run_command_from(command, RunOutput::Outcome { context });
+        self.run_worker_command(command, RunOutput::Outcome { context });
     }
     pub fn run_cohort_export(
         &self,
@@ -604,7 +604,7 @@ impl Worker {
             &job,
         );
         let id = source.selection["id"].as_str().unwrap().to_string();
-        self.run_command_from(
+        self.run_worker_command(
             command,
             RunOutput::Export {
                 destination: destination.to_path_buf(),
@@ -613,6 +613,12 @@ impl Worker {
                 kind: kind.into(),
             },
         );
+    }
+    fn run_worker_command(&self, command: io::Result<Command>, output: RunOutput) {
+        match command {
+            Ok(command) => self.run_command_from(command, output),
+            Err(_) => self.finish("failed", Some("storage_error")),
+        }
     }
     #[cfg(test)]
     fn run_command(&self, command: Command) {
@@ -813,7 +819,9 @@ impl Worker {
                                         | "invalid_export"
                                         | "export_verification_failed"
                                         | "unsupported_export_encoding"
-                                        | "vlen_budget_exceeded"),
+                                        | "vlen_budget_exceeded"
+                                        | "worker_memory_limit"
+                                        | "resource_setup_failed"),
                                     ) => code,
                                     _ => "worker_failed",
                                 }
@@ -1078,10 +1086,15 @@ fn worker_command(
     options: &Value,
     sha: &str,
     job: &Value,
-) -> Command {
+) -> io::Result<Command> {
+    // Linux caps individual exec arguments at 128 KiB on 4 KiB page
+    // systems. Pass the embedded worker on a private, anonymous file instead.
+    let mut input = tempfile::tempfile()?;
+    input.write_all(script.as_bytes())?;
+    input.rewind()?;
     let mut command = Command::new(python);
     command
-        .args(["-I", "-B", "-u", "-c", script])
+        .args(["-I", "-B", "-u", "-"])
         .env_remove("PYTHONPATH")
         .env_remove("PYTHONHOME")
         .env_remove("VIRTUAL_ENV")
@@ -1092,10 +1105,10 @@ fn worker_command(
         .arg(options.to_string())
         .arg(sha)
         .arg(job.to_string())
-        .stdin(Stdio::null())
+        .stdin(Stdio::from(input))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    command
+    Ok(command)
 }
 fn valid_export(r: &Value, id: &str, kind: &str) -> bool {
     r["selectionId"] == id
@@ -1402,6 +1415,29 @@ mod tests {
         assert_eq!(restored.snapshot().last_export.unwrap()["retained"], 24562);
     }
     #[test]
+    fn embedded_worker_source_can_exceed_the_linux_exec_argument_limit() {
+        let folder = tempfile::tempdir().unwrap();
+        let worker = Worker::new(folder.path());
+        let source = format!("#{}\n{}", "x".repeat(128 * 1024), success());
+        let command = worker_command(
+            &python_path(),
+            &source,
+            Path::new(""),
+            &serde_json::json!({}),
+            "",
+            &serde_json::json!({}),
+        )
+        .unwrap();
+        worker.reserve(10).unwrap();
+        worker.run_command(command);
+        assert_eq!(
+            worker.snapshot().status,
+            "completed",
+            "{:?}",
+            worker.snapshot().error
+        );
+    }
+    #[test]
     fn success_is_persisted_only_after_clean_exit_and_restored() {
         let folder = tempfile::tempdir().unwrap();
         let worker = Worker::new(folder.path());
@@ -1633,7 +1669,7 @@ mod tests {
             0,
         )
         .unwrap();
-        w.reserve(120).unwrap();
+        w.reserve(600).unwrap();
         w.run_analysis(
             &python_path(),
             worker_script(),
@@ -1662,7 +1698,7 @@ mod tests {
             1,
         )
         .unwrap();
-        w.reserve(120).unwrap();
+        w.reserve(600).unwrap();
         w.run_analysis(
             &python_path(),
             worker_script(),
@@ -1679,7 +1715,7 @@ mod tests {
         assert!(w.inner.lock().unwrap().child.is_none());
         let output = root.path().join("blocked.h5ad");
         let input = w.export_source(selection).unwrap();
-        w.reserve(120).unwrap();
+        w.reserve(600).unwrap();
         w.run_export(
             &python_path(),
             worker_script(),
@@ -1711,7 +1747,7 @@ mod tests {
             )
             .unwrap();
         let input = restored.export_source(selection).unwrap();
-        restored.reserve(120).unwrap();
+        restored.reserve(600).unwrap();
         restored.run_export(
             &python_path(),
             worker_script(),
@@ -1751,6 +1787,115 @@ mod tests {
                 .memory_mib,
             2048
         );
+    }
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[ignore = "requires CAUSALMED_TEST_DONOR_H5AD and anndata; creates large HDF5 metadata"]
+    fn public_h5ad_native_memory_denial_preserves_committed_artifacts() {
+        let root = tempfile::tempdir().unwrap();
+        let digest = |file: &Path| {
+            let output = Command::new(python_path())
+                .args(["-I", "-B", "-c", "import hashlib,sys; print(hashlib.file_digest(open(sys.argv[1], 'rb'), 'sha256').hexdigest())"])
+                .arg(file)
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        let original = PathBuf::from(std::env::var("CAUSALMED_TEST_DONOR_H5AD").unwrap());
+        let original_sha = digest(&original);
+        for mode in ["attribute", "compatibility"] {
+            let project = root.path().join(mode);
+            std::fs::create_dir(&project).unwrap();
+            let source = project.join("source.h5ad");
+            std::fs::copy(&original, &source).unwrap();
+            let fixture = Command::new(python_path())
+                .args([
+                    "-I",
+                    "-B",
+                    "-c",
+                    r#"
+import sys, h5py
+with h5py.File(sys.argv[1], 'r+') as file:
+    group = file['uns'].create_group('resource_probe')
+    node = group.create_dataset('null', dtype='f8') if sys.argv[2] == 'compatibility' else group
+    node.attrs.create('large', ['Z' * (16 << 20)] * 18, dtype=h5py.string_dtype())
+"#,
+                ])
+                .arg(&source)
+                .arg(mode)
+                .output()
+                .unwrap();
+            assert!(fixture.status.success(), "{:?}", fixture.stderr);
+            let sha = digest(&source);
+            let worker = Worker::new(&project);
+            let run_export = |worker: &Worker, id: &str, destination: &Path, kind: &str| {
+                let input = worker.export_source(id).unwrap();
+                worker.reserve(600).unwrap();
+                worker.run_export(&python_path(), worker_script(), input, destination, kind);
+            };
+            worker.reserve(600).unwrap();
+            worker.run_analysis(
+                &python_path(),
+                worker_script(),
+                &source,
+                &serde_json::json!({"donorColumn": "replicate"}),
+                &sha,
+            );
+            let report = worker.snapshot().report.unwrap();
+            assert_eq!(report["qc"]["retained"], 24562);
+            let id = report["selection"]["id"].as_str().unwrap();
+            let qc = project.join("qc-runs").join(id);
+            let files = [
+                qc.join("cells.npz"),
+                qc.join("manifest.json"),
+                project.join("saved.zip"),
+            ];
+            run_export(&worker, id, &files[2], "export_qc");
+            assert_eq!(worker.snapshot().status, "completed");
+            let digests = files
+                .each_ref()
+                .map(|file| crate::project::digest(file).unwrap());
+            let receipt = worker.snapshot().last_export.unwrap();
+            worker
+                .set_limits(
+                    resources::Limits {
+                        // The Linux ceiling includes library mappings at startup.
+                        memory_mib: if cfg!(target_os = "linux") { 384 } else { 240 },
+                        cpu_seconds: 60,
+                        threads: 1,
+                    },
+                    0,
+                )
+                .unwrap();
+            let blocked = project.join("blocked.h5ad");
+            run_export(&worker, id, &blocked, "export_h5ad");
+            let failed = worker.snapshot();
+            assert_eq!(
+                failed.error.as_deref(),
+                Some("worker_memory_limit"),
+                "{mode}"
+            );
+            assert!(failed.percent >= 10, "failed before HDF5 writing: {mode}");
+            assert!(!blocked.exists());
+            assert!(!std::fs::read_dir(&project).unwrap().any(|entry| {
+                entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with(".partial")
+            }));
+            assert_eq!(failed.last_export, Some(receipt));
+            assert_eq!(
+                files
+                    .each_ref()
+                    .map(|file| crate::project::digest(file).unwrap()),
+                digests
+            );
+            assert_eq!(Worker::new(&project).snapshot().report, Some(report));
+            assert_eq!(digest(&source), sha);
+        }
+        assert_eq!(digest(&original), original_sha);
     }
     #[test]
     fn outcome_reservation_exposes_operation_and_cancels_before_spawn() {

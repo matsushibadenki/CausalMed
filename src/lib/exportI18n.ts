@@ -9,7 +9,7 @@ export const exportText = {
   source_conflict:'Choose a different destination from the source file.', destination_exists:'That file already exists. Choose a new filename.',
   empty_selection:'No retained cells. You can still export the full QC results.', metadata_collision:'The source contains conflicting provenance fields.',
   unsupported_export_encoding:'This H5AD encoding cannot be streamed safely. No new export was published.',
-  vlen_budget_exceeded: 'Variable-length H5AD text exceeds the 8 MiB read limit.',
+  vlen_budget_exceeded: 'Variable-length H5AD data exceeds the 8 MiB read limit.',
   invalid_export:'Choose a new .h5ad or .zip destination.', export_verification_failed:'Output verification failed. No new export was published.',
  },
  ja: {
@@ -22,7 +22,7 @@ export const exportText = {
   source_conflict:'原本とは別の出力先を選んでください。', destination_exists:'ファイルがすでにあります。新しい名前を選んでください。',
   empty_selection:'保持候補がありません。全細胞の QC 結果は書き出せます。', metadata_collision:'原本内の記録用フィールドが競合しています。',
   unsupported_export_encoding:'このH5AD形式は安全に分割書き出しできません。新しい出力は確定していません。',
-  vlen_budget_exceeded: 'H5ADの可変長文字列が1回の読み込み上限（8 MiB）を超えました。',
+  vlen_budget_exceeded: 'H5ADの可変長データが1回の読み込み上限（8 MiB）を超えました。',
   invalid_export:'新しい .h5ad または .zip の出力先を選んでください。', export_verification_failed:'出力の検証に失敗しました。新しい書き出しは確定していません。',
  },
  zh: {
@@ -35,7 +35,7 @@ export const exportText = {
   source_conflict:'请选择与源文件不同的目标。', destination_exists:'文件已存在，请选择新文件名。',
   empty_selection:'没有保留细胞，仍可导出完整 QC 结果。', metadata_collision:'源文件中的来源记录字段冲突。',
   unsupported_export_encoding:'无法安全地分块导出此H5AD编码，未发布新文件。',
-  vlen_budget_exceeded: 'H5AD 可变长度文本超过单次读取上限（8 MiB）。',
+  vlen_budget_exceeded: 'H5AD 可变长度数据超过单次读取上限（8 MiB）。',
   invalid_export:'请选择新的 .h5ad 或 .zip 文件。', export_verification_failed:'输出验证失败，未发布新的导出文件。',
  },
 };

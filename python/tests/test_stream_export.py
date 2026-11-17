@@ -17,10 +17,282 @@ from causalmed_worker.stream_export import stream_retained_h5ad
 
 @unittest.skipIf(ad is None, 'Install python/requirements.txt for H5AD tests')
 class StreamExportTests(unittest.TestCase):
+    def test_compound_reference_fields_preserve_hdf5_copy_tokens(self):
+        import h5py
+        from causalmed_worker.stream_export import H5adStreamCopy
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with h5py.File(root / 'source.h5', 'w') as source, h5py.File(root / 'dest.h5', 'w') as dest:
+                referenced = source.create_dataset('referenced', data=[1, 2, 3])
+                dtype = np.dtype([('refs', [('object', h5py.ref_dtype),
+                                            ('region', h5py.regionref_dtype, (2,))]),
+                                  ('text', h5py.string_dtype())])
+                values = np.empty(5, dtype=dtype)
+                for i in range(len(values)):
+                    values[i] = ((referenced.ref, [referenced.regionref[:1], h5py.RegionReference()]), f'細胞-{i}')
+                table = source.create_dataset('table', data=values)
+                table.attrs['text'] = ['a', '中文']
+                source.copy(table, dest, name='reference')
+                copier = H5adStreamCopy()
+                with patch.object(h5py.File, 'copy', side_effect=AssertionError('whole object copy')), patch(
+                    'causalmed_worker.backed.VLEN_BYTE_LIMIT', 20
+                ):
+                    copier.copy_object(table, dest, 'output')
+                actual, expected = dest['output'][:], dest['reference'][:]
+                self.assertEqual(actual.dtype, expected.dtype)
+                np.testing.assert_array_equal(actual['text'], expected['text'])
+                np.testing.assert_array_equal(dest['output'].attrs['text'], dest['reference'].attrs['text'])
+                for name in ('object', 'region'):
+                    self.assertEqual([bool(x) for x in actual['refs'][name].flat],
+                                     [bool(x) for x in expected['refs'][name].flat])
+
+    def test_mixed_nested_reference_and_vlen_are_copied_in_tiles(self):
+        import h5py
+        from causalmed_worker.backed import _vlen_hdf5
+        from causalmed_worker.stream_export import H5adStreamCopy
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with h5py.File(root / 'source.h5', 'w') as source, h5py.File(root / 'dest.h5', 'w') as dest:
+                referenced = source.create_dataset('referenced', data=[1, 2, 3])
+                leaf = np.dtype([('object', h5py.ref_dtype), ('region', h5py.regionref_dtype),
+                                 ('text', h5py.string_dtype()), ('seq', h5py.vlen_dtype('>i2'))])
+                dtype = np.dtype([('items', leaf, (2,)), ('fixed', '>i4')])
+                data = np.empty((2, 3), dtype=dtype)
+                data['fixed'] = 21
+                data['items']['text'] = '細胞'
+                for index in np.ndindex(data['items'].shape):
+                    row = data['items'][index]
+                    row['object'] = referenced.ref if index[-1] else h5py.Reference()
+                    row['region'] = referenced.regionref[:1] if index[-1] else h5py.RegionReference()
+                    row['seq'] = np.array([9, 500], dtype='>i2')
+                table = source.create_dataset('table', data=data)
+                source.copy(table, dest, name='expected')
+                with patch.object(h5py.File, 'copy', side_effect=AssertionError('whole object copy')), patch(
+                    'causalmed_worker.backed.VLEN_BYTE_LIMIT', 33
+                ):
+                    H5adStreamCopy().copy_object(table, dest, 'output')
+                actual, expected = dest['output'][:], dest['expected'][:]
+                self.assertEqual(actual.dtype, expected.dtype)
+                np.testing.assert_array_equal(actual['fixed'], expected['fixed'])
+                np.testing.assert_array_equal(actual['items']['text'], expected['items']['text'])
+                for index in np.ndindex(data['items'].shape):
+                    np.testing.assert_array_equal(actual['items']['seq'][index], expected['items']['seq'][index])
+                library, _, _ = _vlen_hdf5()
+                for key, ref in [(b'object', h5py.h5t.STD_REF_OBJ), (b'region', h5py.h5t.STD_REF_DSETREG)]:
+                    projected_leaf = h5py.h5t.create(h5py.h5t.COMPOUND, ref.get_size())
+                    projected_leaf.insert(key, 0, ref)
+                    array = h5py.h5t.array_create(projected_leaf, (2,))
+                    projected = h5py.h5t.create(h5py.h5t.COMPOUND, array.get_size())
+                    projected.insert(b'items', 0, array)
+                    tokens = []
+                    for name in ('output', 'expected'):
+                        raw = np.empty(data.size * projected.get_size(), dtype=np.uint8)
+                        dataset = dest[name]
+                        self.assertEqual(library.H5Dread(dataset.id.id, projected.id, 0, 0, 0, raw.ctypes.data), 0)
+                        tokens.append(raw)
+                    np.testing.assert_array_equal(*tokens)
+
+    def test_native_vlen_attribute_packs_staging_without_changing_storage_type(self):
+        import h5py
+        from causalmed_worker.backed import scratch_vector
+        from causalmed_worker.stream_export import H5adStreamCopy
+
+        dtype = np.dtype({'names': ['text', 'fixed'], 'formats': [h5py.string_dtype(), '>i4'],
+                          'offsets': [0, 128], 'itemsize': 256})
+        data = np.array([('細胞', 51), ('中文', 19)], dtype=dtype)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with h5py.File(root / 'source.h5', 'w') as source, h5py.File(root / 'dest.h5', 'w') as dest:
+                source.attrs.create('padded', data, dtype=dtype)
+                source_type = source.attrs.get_id('padded').get_type()
+                packed = source_type.copy()
+                packed.pack()
+                self.assertLess(packed.get_size(), source_type.get_size())
+                with patch('causalmed_worker.backed.scratch_vector', wraps=scratch_vector) as staging:
+                    H5adStreamCopy.copy_object_attrs(source, dest)
+                staging.assert_called_once_with(len(data) * packed.get_size(), 'uint8', memory_limit=1024 * 1024)
+                self.assertEqual(dest.attrs.get_id('padded').get_type(), source_type)
+                np.testing.assert_array_equal(dest.attrs['padded'], source.attrs['padded'])
+
+    def test_compound_array_members_and_native_vlen_attribute_match_hdf5_copy(self):
+        import h5py
+        from h5py._hl.attrs import AttributeManager
+        from causalmed_worker.stream_export import H5adStreamCopy
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with h5py.File(root / 'source.h5', 'w') as source, h5py.File(root / 'dest.h5', 'w') as dest:
+                leaf = np.dtype([('label', h5py.string_dtype()), ('sequence', h5py.vlen_dtype('int32')),
+                                 ('fixed', '>i2')])
+                dtype = np.dtype([('items', leaf, (2, 3)), ('text', h5py.string_dtype(), (2,))])
+                data = np.empty(4, dtype=dtype)
+                data['items']['label'] = '細胞'
+                data['items']['fixed'] = 25
+                data['text'] = ['a', '中文']
+                for index in np.ndindex(data['items'].shape):
+                    data['items']['sequence'][index] = np.arange(sum(index), dtype='int32')
+                table = source.create_dataset('table', data=data)
+                table.attrs['native_vlen'] = data
+                source.copy(table, dest, name='reference')
+
+                original_read = AttributeManager.__getitem__
+
+                def read_attribute(attrs, name):
+                    if name == 'native_vlen':
+                        raise AssertionError('attribute decoded to Python objects')
+                    return original_read(attrs, name)
+
+                with patch.object(AttributeManager, '__getitem__', read_attribute), patch(
+                    'causalmed_worker.backed.VLEN_BYTE_LIMIT', 190
+                ):
+                    H5adStreamCopy().copy_object(table, dest, 'output')
+                for actual, expected in [(dest['output'][:], dest['reference'][:]),
+                                         (dest['output'].attrs['native_vlen'], dest['reference'].attrs['native_vlen'])]:
+                    self.assertEqual(actual.dtype, expected.dtype)
+                    np.testing.assert_array_equal(actual['text'], expected['text'])
+                    np.testing.assert_array_equal(actual['items']['label'], expected['items']['label'])
+                    np.testing.assert_array_equal(actual['items']['fixed'], expected['items']['fixed'])
+                    for index in np.ndindex(actual['items'].shape):
+                        np.testing.assert_array_equal(actual['items']['sequence'][index],
+                                                      expected['items']['sequence'][index])
+                with patch('causalmed_worker.backed.VLEN_BYTE_LIMIT', 60):
+                    with self.assertRaisesRegex(ValueError, 'vlen_budget_exceeded'):
+                        H5adStreamCopy().copy_object(table, dest, 'too_large')
+
+    def test_nested_compound_and_large_attribute_match_hdf5_copy(self):
+        import h5py
+        from h5py._hl.attrs import AttributeManager
+        from causalmed_worker.stream_export import H5adStreamCopy
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with h5py.File(root / 'source.h5', 'w') as source, h5py.File(root / 'dest.h5', 'w') as dest:
+                dtype = np.dtype([
+                    ('outer', [('inner', [('text', h5py.string_dtype()),
+                                          ('sequence', h5py.vlen_dtype('int32')),
+                                          ('fixed', '>i4', (2,))])]),
+                    ('title', h5py.string_dtype()),
+                ])
+                records = np.empty((2, 3), dtype=dtype)
+                for index in np.ndindex(records.shape):
+                    records[index] = ((('細胞', np.arange(7, dtype='int32') + sum(index), [1, 7]),), 'name')
+                table = source.create_dataset('table', data=records, track_order=True)
+                table.attrs['large'] = np.arange(300000, dtype='>i4').reshape(300, 1000)
+                source.copy(table, dest, name='reference')
+
+                original_read = AttributeManager.__getitem__
+
+                def read_attribute(attrs, name):
+                    if name == 'large':
+                        raise AssertionError('large attribute allocated as a Python array')
+                    return original_read(attrs, name)
+
+                with patch.object(AttributeManager, '__getitem__', read_attribute), patch(
+                    'causalmed_worker.backed.VLEN_BYTE_LIMIT', 45
+                ):
+                    H5adStreamCopy().copy_object(table, dest, 'output')
+                for index in np.ndindex(records.shape):
+                    actual, expected = dest['output'][index], dest['reference'][index]
+                    self.assertEqual(actual['title'], expected['title'])
+                    a, b = actual['outer']['inner'], expected['outer']['inner']
+                    self.assertEqual(a['text'], b['text'])
+                    np.testing.assert_array_equal(a['sequence'], b['sequence'])
+                    np.testing.assert_array_equal(a['fixed'], b['fixed'])
+                self.assertEqual(dest['output'].dtype, dest['reference'].dtype)
+                self.assertEqual(dest['output'].attrs.get_id('large').dtype,
+                                 dest['reference'].attrs.get_id('large').dtype)
+                np.testing.assert_array_equal(dest['output'].attrs['large'], dest['reference'].attrs['large'])
+                with patch('causalmed_worker.backed.VLEN_BYTE_LIMIT', 39):
+                    with self.assertRaisesRegex(ValueError, 'vlen_budget_exceeded'):
+                        H5adStreamCopy().copy_object(table, dest, 'too_large')
+
+    def test_compound_metadata_payload_and_cross_file_references(self):
+        import h5py
+        from causalmed_worker.stream_export import H5adStreamCopy
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with h5py.File(root / 'source.h5', 'w') as source, h5py.File(root / 'dest.h5', 'w') as dest:
+                dtype = np.dtype([('text', h5py.string_dtype()), ('values', h5py.vlen_dtype('int32')),
+                                  ('index', 'i4')])
+                data = np.empty((2, 3), dtype=dtype)
+                for index in np.ndindex(data.shape):
+                    data[index] = ('細胞', np.arange(7, dtype='int32') + sum(index), sum(index))
+                table = source.create_dataset('table', data=data)
+                table.attrs['schema'] = 'test'
+                table.attrs['pointer'] = table.ref
+                with patch('causalmed_worker.backed.VLEN_BYTE_LIMIT', 45):
+                    H5adStreamCopy().copy_object(table, dest, 'table')
+                for index in np.ndindex(data.shape):
+                    expected, actual = table[index], dest['table'][index]
+                    self.assertEqual(actual['text'], expected['text'])
+                    self.assertEqual(actual['index'], expected['index'])
+                    np.testing.assert_array_equal(actual['values'], expected['values'])
+                self.assertEqual(dest['table'].attrs['schema'], 'test')
+                self.assertFalse(dest['table'].attrs['pointer'])
+                with patch('causalmed_worker.backed.VLEN_BYTE_LIMIT', 34):
+                    with self.assertRaisesRegex(ValueError, 'vlen_budget_exceeded'):
+                        H5adStreamCopy().copy_object(table, dest, 'too_large')
+                for name, dtype, ref in [('object', h5py.ref_dtype, table.ref),
+                                         ('region', h5py.regionref_dtype, table.regionref[:])]:
+                    refs = source.create_dataset(name, (4,), dtype=dtype)
+                    refs[0] = ref
+                    source.copy(refs, dest, name='reference_' + name)
+                    H5adStreamCopy().copy_object(refs, dest, name)
+                    self.assertEqual([bool(x) for x in dest[name][:]],
+                                     [bool(x) for x in dest['reference_' + name][:]])
+
+    def test_metadata_copy_bounds_dense_and_ragged_reads(self):
+        import h5py
+        from causalmed_worker.stream_export import H5adStreamCopy
+
+        with tempfile.TemporaryDirectory() as directory:
+            with h5py.File(Path(directory) / 'metadata.h5', 'w') as handle:
+                group = handle.create_group('source')
+                group.attrs['description'] = 'metadata'
+                dense = group.create_dataset('dense', data=np.arange(3000).reshape(3, 1000))
+                group['alias'] = dense
+                group['link'] = h5py.SoftLink('dense')
+                ragged = group.create_dataset('ragged', (2, 3), dtype=h5py.vlen_dtype('int32'))
+                for index in np.ndindex(ragged.shape):
+                    ragged[index] = np.arange(12, dtype=np.int32) + sum(index)
+                copier = H5adStreamCopy(block_bytes=1024)
+                with patch('causalmed_worker.backed.VLEN_BYTE_LIMIT', 55):
+                    copier.copy_object(group, handle, 'output')
+                output = handle['output']
+                self.assertEqual(output.attrs['description'], 'metadata')
+                self.assertEqual(output['dense'].id, output['alias'].id)
+                self.assertIsInstance(output.get('link', getlink=True), h5py.SoftLink)
+                np.testing.assert_array_equal(output['dense'][:], dense[:])
+                self.assertLessEqual(copier.max_read_bytes, 1024)
+                for index in np.ndindex(ragged.shape):
+                    np.testing.assert_array_equal(output['ragged'][index], ragged[index])
+                with patch('causalmed_worker.backed.VLEN_BYTE_LIMIT', 47):
+                    with self.assertRaisesRegex(ValueError, 'vlen_budget_exceeded'):
+                        copier.copy_object(ragged, handle, 'too_large')
+
+    def test_multidimensional_vlen_export_tiles_bytes_and_keeps_selected_axes(self):
+        import h5py
+        from causalmed_worker.stream_export import H5adStreamCopy
+
+        with tempfile.TemporaryDirectory() as directory:
+            with h5py.File(Path(directory) / 'matrix.h5', 'w') as handle:
+                rows = np.array([0, 2])
+                for shape, columns in [((3, 301), np.arange(1, 301, 2)), ((3, 3, 91), None)]:
+                    data = np.asarray([f'細胞-{i:04}' for i in range(np.prod(shape))], dtype=object).reshape(shape)
+                    source = handle.create_dataset('source', data=data, dtype=h5py.string_dtype())
+                    with patch('causalmed_worker.backed.VLEN_BYTE_LIMIT', 100):
+                        H5adStreamCopy().copy(source, handle, 'output', rows, columns)
+                    expected = data[rows] if columns is None else data[rows][:, columns]
+                    np.testing.assert_array_equal(handle['output'].asstr()[:], expected)
+                    del handle['source'], handle['output']
+
     def test_legacy_variable_strings_use_projected_bounded_reads(self):
         import h5py
         from anndata.io import write_elem
-        from causalmed_worker.backed import LegacyFrame, VLEN_BLOCK_ROWS, read_bounded_strings
+        from causalmed_worker.backed import LegacyFrame, VLEN_BLOCK_ROWS, read_bounded_vlen
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -43,7 +315,7 @@ class StreamExportTests(unittest.TestCase):
             reads = []
 
             def limited_read(node, selection, **kwargs):
-                values = read_bounded_strings(node, selection, **kwargs)
+                values = read_bounded_vlen(node, selection, **kwargs)
                 if kwargs.get('field') in ('text', 'cell'):
                     self.assertLessEqual(len(values), VLEN_BLOCK_ROWS)
                     reads.append(len(values))
@@ -58,7 +330,7 @@ class StreamExportTests(unittest.TestCase):
 
             with patch.object(LegacyFrame, 'index', new=property(
                 lambda frame: self.fail('full legacy index decode')
-            )), patch('causalmed_worker.backed.read_bounded_strings', side_effect=limited_read), patch.object(
+            )), patch('causalmed_worker.backed.read_bounded_vlen', side_effect=limited_read), patch.object(
                 h5py.Dataset, '__getitem__', reject_full_table
             ):
                 run = root / 'run'

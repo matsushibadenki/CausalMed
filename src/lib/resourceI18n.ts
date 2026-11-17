@@ -1,10 +1,10 @@
 export const resourceText = {
  "en": {
-  "resource_setup_failed": "The operating system could not apply the worker CPU limit.",
+  "resource_setup_failed": "The operating system could not apply the worker resource limits.",
   "title": "Worker resources",
-  "help": "Budgets apply to every supervised Python job in this local project. Resident memory is sampled about every 50 ms; brief peaks may exceed the threshold before termination. This is not a hard allocator or descendant-process limit. CPU time sums the process’s threads, unlike wall time; a kernel CPU limit is a fallback. Thread settings request BLAS/OpenMP parallelism before Python imports; they are not an OS thread-count cap. Originals and prior QC stay unchanged on failure. Settings stay on this machine and are not included in project packages.",
+  "help": "Applies to each supervised Python job. Linux caps the worker’s virtual address space. macOS caps virtual address growth after startup. Live resident-memory monitoring and a final peak check also apply. CPU time sums all worker threads. The thread setting requests BLAS/OpenMP parallelism. Budgets stay on this machine. The source and saved QC remain available after a failed run.",
   "settings": "Budgets",
-  "memory": "Memory threshold",
+  "memory": "Memory budget",
   "cpu": "CPU budget",
   "threads": "Compute threads",
   "save": "Save budgets",
@@ -33,11 +33,11 @@ export const resourceText = {
   "development_runtime_missing": "Configured development Python was not found."
  },
  "ja": {
-  "resource_setup_failed": "OSがworkerのCPU制限を適用できませんでした。",
+  "resource_setup_failed": "OSがワーカーのリソース制限を適用できませんでした。",
   "title": "Workerリソース",
-  "help": "このローカルプロジェクトの全Pythonジョブに適用します。常駐メモリは約50msごとの監視のため、停止前に一時的な超過があり得ます。厳密な割当上限や子孫プロセス全体の制限ではありません。CPU時間はプロセス内スレッドの合計で、経過時間とは異なり、OSのCPU制限も併用します。スレッド指定はPython起動前のBLAS/OpenMPへの要求で、OSによる本数制限ではありません。停止しても原本と過去のQCを保持します。設定は端末内に保存し、プロジェクトパッケージには含めません。",
+  "help": "監視対象のPythonジョブごとに適用します。Linuxは仮想アドレス空間、macOSは起動後の仮想アドレス空間の増加分を制限します。実行中は常駐メモリを監視し、結果の確定前にピークも確認します。CPU時間は全スレッドの合計で、スレッド数はBLAS/OpenMPへの指定です。設定は端末に保存し、失敗時も原本と保存済みQCを保持します。",
   "settings": "使用上限",
-  "memory": "メモリ停止閾値",
+  "memory": "メモリ上限",
   "cpu": "CPU時間上限",
   "threads": "計算スレッド数",
   "save": "上限を保存",
@@ -66,11 +66,11 @@ export const resourceText = {
   "development_runtime_missing": "指定した開発用Pythonが見つかりません。"
  },
  "zh": {
-  "resource_setup_failed": "操作系统无法应用 worker 的 CPU 限制。",
+  "resource_setup_failed": "操作系统无法应用 worker 的资源限制。",
   "title": "Worker 资源",
-  "help": "预算适用于本地项目中的所有受监督 Python 任务。约每50毫秒采样常驻内存，终止前可能短暂超出阈值；这不是严格的内存分配或子孙进程总上限。CPU 时间为进程各线程之和，不同于经过时间，并有内核 CPU 限制作为后备。线程设置在导入 Python 库前请求 BLAS/OpenMP 并行度，不是操作系统线程数上限。失败时保留原始文件和先前 QC。设置仅保存在本机，不包含于项目包。",
+  "help": "每个受监督的 Python 任务单独应用。Linux 限制进程的虚拟地址空间，macOS 限制启动后的虚拟地址空间增长。运行时监测常驻内存，并在提交结果前检查峰值。CPU 时间为所有线程的总和，线程设置用于请求 BLAS/OpenMP 并行度。设置仅保存在本机。任务失败时保留原始文件和已保存的 QC。",
   "settings": "资源预算",
-  "memory": "内存终止阈值",
+  "memory": "内存上限",
   "cpu": "CPU 时间预算",
   "threads": "计算线程数",
   "save": "保存预算",
