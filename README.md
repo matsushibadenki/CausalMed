@@ -8,27 +8,19 @@ The project begins with the research questions discussed in “医学AIの活用
 
 ## Screenshots
 
-Native macOS app shown in Japanese; English and Simplified Chinese are also supported. These screens use public Kang data for workflow verification, not biological or clinical validation.
+The current macOS app is shown in Japanese. The workspace uses public single-cell datasets for workflow checks.
 
-![Bundled Python runtime and a memory-budget stop](docs/images/bundled-worker-runtime.jpg)
+![Dataset registry and resource budgets for the bundled Python worker](docs/images/current-datasets.jpg)
 
-The app carries its own Python 3.12.16 runtime. A per-worker address-space limit and resident-memory monitoring protect the last successful QC result on resource stops.
+The dataset registry shows source dimensions and QC history counts alongside the bundled Python 3.12.16 worker and its resource budgets.
 
-![Expression QC and eight original donor groups from public Kang data](docs/images/bundled-worker-qc.jpg)
+![Expression QC for public Kang 2018 data, showing retention, count and feature histograms, and donor groups](docs/images/current-expression-qc.jpg)
 
-The relocated bundled app inspected 24,673 cells × 15,706 genes and retained 24,562 candidates. Missing mitochondrial features remain explicitly marked as partial QC.
+Kang 2018 QC retained 24,562 of 24,673 cells and excluded 111. The panel shows the distributions and donor groups, and marks QC as partial because matching mitochondrial features are unavailable.
 
-![Retained H5AD export receipt and retained/excluded counts](docs/images/bundled-worker-export.jpg)
+![Multi-value cohort definition and the saved H5AD export receipt](docs/images/current-cohort-export.jpg)
 
-A new H5AD contains the retained cells and recorded QC provenance. The source stays unchanged, and the output receipt records its SHA-256.
-
-![QC history with three selections retained outside the current filtered page](docs/images/qc-bulk-selection.jpg)
-
-QC history selection stays across pages, searches and filters. The toolbar counts selected items outside the current page before a bulk action.
-
-![Project browser with three selected projects across pages](docs/images/project-bulk-selection.jpg)
-
-Project organization supports the same page-spanning selection and reversible bulk trash/restore. The active project is protected from selection.
+The saved CD4/CD8 cohort includes both control and stimulated cells. Its H5AD export receipt records 12,859 retained cells and the output SHA-256. The source and baseline QC references remain visible with the definition.
 
 ## Why this project exists
 
@@ -182,7 +174,7 @@ Rust samples the Python process approximately every 50 ms, terminates and reaps 
 
 Before importing scientific libraries, the worker installs a kernel address-space limit. Linux applies the budget to total virtual address space. macOS adds the budget to the interpreter’s startup address space to account for pre-existing mappings. Whole-value HDF5 reads and compatibility copies run under this limit. The worker also checks the OS-recorded peak resident memory before returning a successful result. Existing virtual mappings can become resident without increasing address space, so the live RSS watchdog and final peak check still matter. The budget applies to the worker process. On resource failure, prior QC and outcome results remain selected, pending selection directories are discarded, and staged exports are removed. See [worker memory-limit validation](docs/WORKER_MEMORY_LIMIT_VALIDATION.md).
 
-Budgets are Rust-owned, saved atomically per local project in `worker-settings.json`, and restored on restart/project switch. They are machine-local execution preferences, not scientific attestations; portable project packages intentionally omit them and use safe defaults after restoration. Live usage is session-only. Corrupt saved settings show a warning and use validated defaults until repaired by saving. See [worker resource validation](docs/WORKER_RESOURCE_VALIDATION.md). The Apple-silicon macOS runtime is bundled and verified with real H5AD data. Linux runtime validation, additional runtime targets, signing and notarization, and clean-machine installation remain pending.
+Budgets are Rust-owned, saved atomically per local project in `worker-settings.json`, and restored on restart/project switch. They are machine-local execution preferences, not scientific attestations; portable project packages intentionally omit them and use safe defaults after restoration. Live usage is session-only. Corrupt saved settings show a warning and use validated defaults until repaired by saving. See [worker resource validation](docs/WORKER_RESOURCE_VALIDATION.md). The Apple-silicon macOS runtime is bundled and verified with real H5AD data. Linux ARM64 worker limits and real-H5AD save/restore were verified in a Debian test environment. Linux runtime packaging, additional targets, signing and notarization, and clean-machine installation remain pending.
 
 The default deadline is 120 seconds and excludes time spent in the file picker. Progress shows runtime initialization, hashing, H5AD opening, annotation processing, expression QC, and validation. Progress percentages represent processing stages, not a prediction of remaining time.
 
@@ -243,7 +235,7 @@ Its fixture yields a control mean of `1.2` and donor MAE of `0.6` in arbitrary u
 
 Expression QC is not doublet detection, ambient-RNA correction, biological validation, or evidence of causality. Full dataset management, normalized donor identifiers across studies, future package schema migrations, multivariate evaluation, M1, confidence intervals, calibration, and independent validation remain staged work in the roadmap.
 
-Current native verification is on macOS. Windows/Linux behavior, other runtime targets and signed clean-machine installation require separate validation. If cloud execution later becomes necessary, the planned boundary is an XServer VPS Cloud application/database core with independent workers communicating over HTTPS or a job queue.
+Native desktop UI verification is on macOS. The supervised worker and real-H5AD save/restore were also tested on Linux ARM64. Windows behavior, additional runtime packaging and signed clean-machine installation require separate validation. If cloud execution later becomes necessary, the planned boundary is an XServer VPS Cloud application/database core with independent workers communicating over HTTPS or a job queue.
 
 Project and QC lists now provide metadata search, combined filters, stable sorting and bounded pages. Comparison selections stay pinned across pages; switching projects clears transient queries and comparison choices. Search now uses project-local persistent SQLite/FTS5 indexes with incremental updates and rebuild after restore. See [browse validation](docs/BROWSE_VALIDATION.md) and [search index validation](docs/SEARCH_INDEX_VALIDATION.md) for public-H5AD checks, 10,000-history tests and scaling limits.
 
