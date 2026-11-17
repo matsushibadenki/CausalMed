@@ -22,11 +22,11 @@
   --font-display: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', 'Hiragino Kaku Gothic ProN', 'Yu Gothic', 'Microsoft YaHei', sans-serif;
   --font-body: var(--font-display);
   --font-mono: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
-  --text-xs: 11px;
-  --text-sm: 12px;
-  --text-base: 13px;
-  --text-lg: 16px;
-  --text-title: 27px;
+  --text-xs: 13px;
+  --text-sm: 14px;
+  --text-base: 15px;
+  --text-lg: 18px;
+  --text-title: 29px;
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;

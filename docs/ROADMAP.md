@@ -45,7 +45,7 @@ Status notation:
 6. 🟢 [Done] Per-project worker budgets, live sampled RSS/CPU meters, kernel CPU fallback, numerical-library thread requests, explicit stop reasons and safe retry; real Kang import/export and native UI verified.
 7. 🟢 [Done] Bundle pinned Python/dependencies for Apple-silicon macOS 14+, isolated execution without development fallback, full build inventory/audit, relocated-app real-H5AD ingestion/QC/export and resource-stop/retry verification.
 8. 🟢 [Done] Multi-value cohort selection with searchable counted checkboxes, frozen OR/AND rules, compatible historical digests, portable restore and mixed-annotation eligibility abstention.
-9. 🟠 [Next] Reduce remaining annotation memory, validate the worker limits on Linux, and verify signed/notarized clean-machine distribution and additional runtime targets.
+9. 🟠 [Next] Reduce remaining annotation memory and verify signed/notarized clean-machine distribution and additional runtime targets.
 10. 🔴 [Later] Multivariate evaluation after validated dataset/donor/perturbation mappings; encryption and full GPU exploration remain subsequent increments.
 
 ## Closest next increments
@@ -94,10 +94,12 @@ Status notation:
 - 🟢 [Done] Reduce HDF5 metadata cache usage during native VLEN attribute transfer and tile compound datasets with isolated reference fields. [Validation](HDF5_REFERENCE_CACHE_VALIDATION.md).
 - 🟢 [Done] Pack padded compound attribute staging records and tile datasets whose nested fields mix reference tokens and variable-length payloads. Preserve attribute datatypes and existing HDF5 reference tokens. [Validation](HDF5_MIXED_NATIVE_COPY_VALIDATION.md).
 - 🟢 [Done] Apply per-worker kernel address-space limits to whole-value VLEN attributes and compatibility copies. Check the OS-reported peak RSS before publishing and retain committed work on failure. [Validation](WORKER_MEMORY_LIMIT_VALIDATION.md).
-- ⭕️ [Pending] Run the Linux worker address-space limit and real-H5AD resource regressions in a Linux runtime. Windows process accounting remains pending.
+- 🟢 [Done] Verify Linux ARM64 worker address-space limits with public H5AD data, including native and compatibility allocation failures, preservation of committed artifacts, and exact QC and export parity after portable restore. Both 10,000-history regressions completed on macOS. [Validation](WORKER_MEMORY_LIMIT_VALIDATION.md).
+- ⭕️ [Pending] Validate Windows process accounting and portable worker distribution on additional targets.
 - 🔴 [Later] Connect validated dataset/donor/perturbation mappings to multivariate M0/M1 evaluation with confidence intervals, calibration, and abstention rules.
 - 🟢 [Done] Reproducible bundled macOS worker: fixed Python/wheel hashes, offline verified cache, app resource selection without `.venv`/system fallback, runtime indicator, and relocated/isolated public-H5AD checks. See [bundled worker validation](BUNDLED_WORKER_VALIDATION.md).
 - 🟠 [Next] Additional runtime targets; validate Linux monitoring and implement Windows process accounting.
+- 🟢 [Done] Use independent Tauri WebviewWindows for the main workspace, floating inspector and native wgpu preview. The Rust workspace remains the shared source of state.
 - 🔴 [Later] Full GPU graph layout, labels, pan/zoom, picking, and docking integration. Add Rust/wgpu cell-embedding views linked to annotation/QC selection.
 - 🔴 [Later] Future package schema migrations and optional inclusion of original source datasets.
 - 🟠 [Next] Native narrow-window and keyboard QA, native drag-docking regression coverage, and additional panels.

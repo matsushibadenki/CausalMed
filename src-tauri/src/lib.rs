@@ -676,7 +676,7 @@ fn select_edge(app: tauri::AppHandle, state: State<AppState>, id: String) -> Rep
                     let _ = renderer.render();
                 }
             }
-            if let Some(window) = handle.get_window("graph") {
+            if let Some(window) = handle.get_webview_window("graph") {
                 let _ = window.set_title(&title);
             }
         })
@@ -688,7 +688,7 @@ fn select_edge(app: tauri::AppHandle, state: State<AppState>, id: String) -> Rep
 fn set_locale(app: tauri::AppHandle, state: State<AppState>, locale: Locale) -> Reply {
     let doc = mutate(&app, &state, |s| s.set_locale(locale))?;
     if let (Some(window), Some(edge)) = (
-        app.get_window("graph"),
+        app.get_webview_window("graph"),
         doc.edges
             .iter()
             .find(|e| Some(&e.id) == doc.workspace.selected_edge_id.as_ref()),
@@ -927,7 +927,7 @@ async fn open_graph(app: tauri::AppHandle) -> Result<(), String> {
     let handle = app.clone();
     app.run_on_main_thread(move || {
         let result = (|| {
-            if let Some(window) = handle.get_window("graph") {
+            if let Some(window) = handle.get_webview_window("graph") {
                 return window.set_focus().map_err(|e| e.to_string());
             }
             let state = handle.state::<AppState>();
@@ -942,29 +942,34 @@ async fn open_graph(app: tauri::AppHandle) -> Result<(), String> {
                 .find(|e| Some(&e.id) == doc.workspace.selected_edge_id.as_ref())
                 .cloned()
                 .ok_or("edge_not_found")?;
-            let window = tauri::window::WindowBuilder::new(&handle, "graph")
-                .title(graph_title(&edge, &doc))
-                .inner_size(720.0, 400.0)
-                .build()
-                .map_err(|e| e.to_string())?;
-            let size = window.inner_size().map_err(|e| e.to_string())?;
-            let renderer = pollster::block_on(Renderer::new(
-                Arc::new(window.clone()),
-                size.width,
-                size.height,
-                edge,
-            ));
-            match renderer {
-                Ok(mut renderer) => {
-                    renderer.render()?;
-                    *state.renderer.lock().map_err(|_| "renderer_unavailable")? = Some(renderer);
-                    Ok(())
-                }
-                Err(error) => {
-                    let _ = window.close();
-                    Err(error)
-                }
+            let window = tauri::WebviewWindowBuilder::new(
+                &handle,
+                "graph",
+                tauri::WebviewUrl::External("about:blank".parse().expect("valid blank URL")),
+            )
+            .title(graph_title(&edge, &doc))
+            .inner_size(720.0, 400.0)
+            .build()
+            .map_err(|e| e.to_string())?;
+
+            let result = (|| {
+                // Only the native GPU surface is displayed in this window.
+                window.as_ref().hide().map_err(|e| e.to_string())?;
+                let size = window.inner_size().map_err(|e| e.to_string())?;
+                let mut renderer = pollster::block_on(Renderer::new(
+                    Arc::new(window.clone()),
+                    size.width,
+                    size.height,
+                    edge,
+                ))?;
+                renderer.render()?;
+                *state.renderer.lock().map_err(|_| "renderer_unavailable")? = Some(renderer);
+                Ok(())
+            })();
+            if result.is_err() {
+                let _ = window.close();
             }
+            result
         })();
         let _ = tx.send(result);
     })
