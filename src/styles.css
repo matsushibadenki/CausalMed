@@ -352,3 +352,13 @@ dialog footer { display: flex; justify-content: flex-end; gap: var(--space-2); m
 .cohort-selection-footer {grid-column:1/-1;display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:13px}
 .cohort-selection-footer .button {margin-left:auto}
 @media(max-width:800px){.cohort-pickers{grid-template-columns:minmax(0,1fr)}.cohort-selection-footer .button{margin-left:0}}
+
+.cohort-choice-list { padding: 4px; scroll-padding: 4px; }
+.cohort-choice-list > small[role=status] { margin: 0; white-space: normal; }
+.cohort-definitions .button { max-width: 100%; white-space: normal; text-align: start; }
+.cohort-definitions .registry-title strong { min-width: 0; }
+
+@media (max-width: 760px) {
+  .multi-definition-form { gap: 8px; }
+  .cohort-selection-footer .neutral-label { max-width: 100%; overflow-wrap: anywhere; }
+}

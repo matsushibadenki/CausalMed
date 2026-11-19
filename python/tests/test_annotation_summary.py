@@ -59,6 +59,34 @@ class AnnotationSummaryTests(unittest.TestCase):
         self.assertFalse(annotation_group(frame,'x')['complete'])
         self.assertEqual(annotation_group(frame,'missing')['counts'],[])
 
+    def test_long_labels_keep_exact_counts_and_character_prefixes(self):
+        prefix = '🧬' * 200
+        first = prefix + 'a' * 10000
+        second = prefix + 'b' * 10000
+        embedded_null = 'a\0' + '日' * 500
+        frame = pd.DataFrame({'label': [first, second, embedded_null, second, first, None]})
+        self.assertEqual(annotation_group(frame, 'label', 2), reference(frame['label']))
+
+    def test_summary_splits_long_hdf5_reads_without_rejecting_single_labels(self):
+        labels = ['🧬' * 90 + suffix for suffix in ('a', 'b', 'c')]
+        values = [labels[1], labels[0], None, labels[2], labels[0], labels[1]]
+        frame = pd.DataFrame({
+            'text': pd.array(values, dtype='string'),
+            'category': pd.Categorical(values, categories=labels),
+        }, index=[f'c{i}' for i in range(len(values))])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'long.synthetic.h5ad'
+            with ad.settings.override(allow_write_nullable_strings=True):
+                ad.AnnData(np.ones((len(frame), 1)), obs=frame).write_h5ad(
+                    path, convert_strings_to_categoricals=False)
+            data = open_research_h5ad(path)
+            try:
+                with patch('causalmed_worker.backed.ANNOTATION_SUMMARY_BYTES', 128):
+                    for key in frame:
+                        self.assertEqual(annotation_group(data.obs, key), reference(frame[key]))
+            finally:
+                data.file.close()
+
     def test_corrupt_late_rows_are_not_skipped_after_a_missing_block(self):
         import h5py
         with tempfile.TemporaryDirectory() as directory:

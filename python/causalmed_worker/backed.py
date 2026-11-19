@@ -5,6 +5,7 @@ compatibility reads still materialize their requested data.
 The interface deliberately covers only worker research reads, not AnnData editing.
 """
 from collections.abc import Mapping
+from contextvars import ContextVar
 from functools import cached_property, lru_cache
 from types import SimpleNamespace
 
@@ -44,6 +45,9 @@ def backed_matrix(node):
     return sparse_dataset(node) if isinstance(node, h5py.Group) else node
 
 
+_NULLABLE_INDEX_ENCODINGS = ('nullable-integer', 'nullable-boolean', 'nullable-string-array')
+
+
 class H5Frame:
     """Minimal read-only annotation frame; never retain decoded column payloads."""
     def __init__(self, group):
@@ -53,7 +57,18 @@ class H5Frame:
         key = self.index_key = group.attrs['_index']
         self.index_node = group[key]
         import h5py
-        self.length = self.index_node.shape[0] if isinstance(self.index_node, h5py.Dataset) and self.index_node.ndim == 1 else len(self.index)
+        index_data = self.index_node
+        if isinstance(index_data, h5py.Group):
+            encoding = index_data.attrs.get('encoding-type', '')
+            if encoding == 'categorical':
+                index_data = index_data.get('codes')
+            elif encoding in _NULLABLE_INDEX_ENCODINGS:
+                index_data = index_data.get('values')
+        self.length = (
+            index_data.shape[0]
+            if isinstance(index_data, h5py.Dataset) and index_data.ndim == 1
+            else len(self.index)
+        )
         self.columns = pd.Index(group.attrs['column-order'])
         if not self.columns.is_unique or key in self.columns:
             raise ValueError('invalid_h5ad')
@@ -100,6 +115,8 @@ VLEN_BLOCK_ROWS = 256
 
 
 VLEN_BYTE_LIMIT = 8 * 1024 * 1024
+ANNOTATION_SUMMARY_BYTES = 1024 * 1024
+_annotation_summary_read = ContextVar('annotation_summary_read', default=False)
 
 
 def vlen_byte_limit():
@@ -162,7 +179,6 @@ def read_bounded_vlen(node, selection, *, field=None, decode=True, byte_limit=No
         _fields_ = [('length', ctypes.c_size_t), ('address', ctypes.c_void_p)]
 
     element = (ctypes.c_char * dtype.itemsize) if fixed else VlenValue if numeric else ctypes.c_void_p
-    byte_limit = VLEN_BYTE_LIMIT if byte_limit is None else byte_limit
     library, allocate_type, release_type = _vlen_hdf5()
     owned = {}
     allocated = 0
@@ -248,6 +264,11 @@ def read_bounded_vlen(node, selection, *, field=None, decode=True, byte_limit=No
                 raise ValueError('invalid_h5ad')
             return values
         element_count = count * prod(array_shape)
+        if byte_limit is None:
+            byte_limit = VLEN_BYTE_LIMIT
+            # Preserve the original limit for an individual large label.
+            if element_count > 1 and info is not None and _annotation_summary_read.get():
+                byte_limit = min(byte_limit, ANNOTATION_SUMMARY_BYTES)
         if element_count * ctypes.sizeof(element) > VLEN_BYTE_LIMIT:
             raise ValueError('vlen_budget_exceeded')
         output = (element * element_count)()
@@ -451,7 +472,11 @@ def is_budgeted_vlen(dtype):
 
 
 def string_block_rows(dtype, rows):
-    return min(rows, VLEN_BLOCK_ROWS) if is_budgeted_vlen(dtype) else rows
+    if is_budgeted_vlen(dtype):
+        return min(rows, VLEN_BLOCK_ROWS)
+    if _annotation_summary_read.get() and dtype.kind == 'S':
+        return min(rows, max(1, ANNOTATION_SUMMARY_BYTES // dtype.itemsize))
+    return rows
 
 
 class CategoryDictionary:
@@ -590,9 +615,6 @@ def iter_annotation_column(frame, key, block_rows=8192, *, include_index=True):
     Projected dictionaries load only referenced labels per block. The native
     string payload allocation has a separate byte budget.
     """
-    import h5py
-    import pandas as pd
-    from anndata.io import read_elem
     if block_rows < 1:
         raise ValueError('invalid_h5ad')
     if isinstance(frame, LegacyFrame):
@@ -614,7 +636,14 @@ def iter_annotation_column(frame, key, block_rows=8192, *, include_index=True):
         return
     if key not in frame:
         raise KeyError(key)
-    node = frame.group[key]
+    yield from _iter_h5_column(frame, frame.group[key], key, block_rows, include_index)
+
+
+def _iter_h5_column(frame, node, key, block_rows, include_index):
+    import h5py
+    import pandas as pd
+    from anndata.io import read_elem
+
     encoding = node.attrs.get('encoding-type', '')
     dtype = None
     categories = None
@@ -665,7 +694,8 @@ def iter_annotation_column(frame, key, block_rows=8192, *, include_index=True):
             values[children[1][start:stop]] = pd.NA
         if not include_index:
             index = None
-        elif 'index' not in vars(frame) and h5py.check_string_dtype(frame.index_node.dtype):
+        elif ('index' not in vars(frame) and isinstance(frame.index_node, h5py.Dataset)
+              and h5py.check_string_dtype(frame.index_node.dtype)):
             index = pd.Index(read_annotation_values(frame.index_node, slice(start, stop)),
                              name=None if frame.index_key == '_index' else frame.index_key)
         else:
@@ -803,11 +833,25 @@ def annotation_schema(frame, key, block_rows=8192):
     return {'name': key, 'dtype': str(dtype)[:100], 'kind': kind, 'nullable': nullable}
 
 
+def _annotation_summary_blocks(frame, key, block_rows):
+    blocks = iter_annotation_column(frame, key, block_rows, include_index=False)
+    while True:
+        token = _annotation_summary_read.set(True)
+        try:
+            block = next(blocks, None)
+        finally:
+            _annotation_summary_read.reset(token)
+        if block is None:
+            return
+        yield block
+        del block
+
+
 def annotation_group(frame, key, block_rows=8192):
     """Exact disk-backed counts with a cardinality-independent frequency cache.
 
-    SQLite has a 1 MiB page cache. Row strings/category dictionaries and indices
-    still follow iter_annotation_column's documented bounds, not a byte cap.
+    SQLite has a 1 MiB page cache. Projected string reads use a smaller
+    multi-value payload budget. Individual labels retain the normal VLEN limit.
     Equal-frequency labels use deterministic first-source-occurrence order;
     pandas' default unstable frequency sort is deliberately not reproduced. No SQL text is constructed from source annotation values.
     """
@@ -821,23 +865,43 @@ def annotation_group(frame, key, block_rows=8192):
         database.execute('PRAGMA cache_size=-1024')
         database.execute('PRAGMA temp_store=FILE')
         database.execute('CREATE TABLE counts (label TEXT PRIMARY KEY, count INTEGER NOT NULL, first_row INTEGER NOT NULL) WITHOUT ROWID')
-        for start, block in iter_annotation_column(frame, key, block_rows, include_index=False):
-            strings = block.astype('string')
-            missing += int(strings.isna().sum())
-            # sort=False preserves first occurrence within the processing block.
-            counts = strings.dropna().value_counts(sort=False)
-            rows = []
-            for ordinal, (label, count) in enumerate(counts.items()):
-                label = str(label)
-                labels_fit &= len(label.encode('utf-8')) <= 200
-                rows.append((label, int(count), start + ordinal))
-            database.executemany('INSERT INTO counts VALUES (?,?,?) ON CONFLICT(label) DO UPDATE SET count=count+excluded.count', rows)
+        def count_rows():
+            nonlocal missing, labels_fit
+            for start, block in _annotation_summary_blocks(frame, key, block_rows):
+                strings = block.astype('string')
+                missing += int(strings.isna().sum())
+                counts = strings.dropna().value_counts(sort=False)
+                for ordinal, (label, count) in enumerate(counts.items()):
+                    label = str(label)
+                    if labels_fit:
+                        labels_fit = len(label) <= 200 and len(label.encode('utf-8')) <= 200
+                    yield label, int(count), start + ordinal
+                    del label
+                del block, strings, counts
+
+        database.executemany(
+            'INSERT INTO counts VALUES (?,?,?) ON CONFLICT(label) DO UPDATE SET count=count+excluded.count',
+            count_rows(),
+        )
         distinct, total = database.execute('SELECT count(*), coalesce(sum(count),0) FROM counts').fetchone()
-        top = database.execute('SELECT label,count FROM counts ORDER BY count DESC,first_row ASC LIMIT 20').fetchall()
+        # UTF-8 needs at most four bytes per character. Slice the BLOB to
+        # preserve embedded NULs and drop any partial character at the end.
+        top = database.execute(
+            'SELECT substr(CAST(label AS BLOB),1,800),count '
+            'FROM counts ORDER BY count DESC,first_row ASC LIMIT 20'
+        ).fetchall()
     return {'distinct': distinct, 'missing': missing,
             'complete': distinct <= 20 and labels_fit,
             'other': total - sum(count for _, count in top),
-            'counts': [{'label': label[:200], 'count': count} for label, count in top]}
+            'counts': [{'label': label.decode('utf-8', errors='ignore')[:200], 'count': count}
+                       for label, count in top]}
+
+
+def _supports_grouped_index(node):
+    encoding = node.attrs.get('encoding-type', '')
+    return encoding in _NULLABLE_INDEX_ENCODINGS or (
+        encoding == 'categorical' and projected_category_dictionary(node['categories']) is not None
+    )
 
 
 def iter_frame_index(frame, block_rows=8192):
@@ -861,19 +925,26 @@ def iter_frame_index(frame, block_rows=8192):
                 start, min(start + block_rows, len(frame)), lambda a, b: read_annotation_values(node, slice(a, b))
             ):
                 yield offset, pd.Series(values, copy=False)
+    elif isinstance(node, h5py.Group) and _supports_grouped_index(node):
+        yield from _iter_h5_column(frame, node, frame.index_key, block_rows, False)
     else:
         for start in range(0, len(frame), block_rows):
             yield start, pd.Series(frame.index[start:start + block_rows], copy=False)
 
 
-def _numeric_category_keys(values):
-    """Encode numeric keys losslessly, with pandas-equivalent signed zero."""
+def _numeric_category_keys(values, *, allow_nan=False):
+    """Encode exact numeric keys, normalizing zero and NaN components."""
     import numpy as np
 
-    if values.dtype.kind == 'f':
-        if np.isnan(values).any():
-            raise ValueError('invalid_h5ad')
-        values[values == 0] = 0
+    if values.dtype.kind in 'fc':
+        values = values.copy()
+        components = (values.real, values.imag) if values.dtype.kind == 'c' else (values,)
+        for component in components:
+            missing = np.isnan(component)
+            if missing.any() and not allow_nan:
+                raise ValueError('invalid_h5ad')
+            component[component == 0] = 0
+            component[missing] = np.nan
     return (value.tobytes() for value in values)
 
 
@@ -890,18 +961,44 @@ def _distinct_labels(blocks):
         return database.execute('SELECT count(*) FROM labels').fetchone()[0]
 
 
+def _encoded_index_keys(block):
+    """Normalize the scalar values of a grouped index for exact SQLite keys."""
+    import numpy as np
+    import pandas as pd
+
+    for value in block:
+        if pd.isna(value):
+            yield b''
+        elif isinstance(value, (float, np.floating)):
+            yield np.format_float_scientific(value if value != 0 else 0.0, unique=True)
+        else:
+            yield str(value)
+
+
 def duplicate_frame_ids(frame):
     import h5py
+    import numpy as np
 
     if isinstance(frame, LegacyFrame):
-        if h5py.check_string_dtype(frame.dtype(frame.index_key)):
-            return len(frame) - _distinct_labels(block for _, block in iter_frame_index(frame))
+        dtype = frame.dtype(frame.index_key)
+    elif isinstance(frame, H5Frame) and isinstance(frame.index_node, h5py.Dataset) and frame.index_node.ndim == 1:
+        dtype = frame.index_node.dtype
+    elif isinstance(frame, H5Frame) and isinstance(frame.index_node, h5py.Group):
+        if not _supports_grouped_index(frame.index_node):
+            return int(frame.index.duplicated().sum())
+        keys = (_encoded_index_keys(block) for _, block in iter_frame_index(frame))
+        return len(frame) - _distinct_labels(keys)
+    else:
         return int(frame.index.duplicated().sum())
 
-    node = frame.index_node if isinstance(frame, H5Frame) else None
-    if isinstance(node, h5py.Dataset) and node.ndim == 1 and h5py.check_string_dtype(node.dtype):
-        return len(frame) - _distinct_labels(block for _, block in iter_frame_index(frame))
-    return int(frame.index.duplicated().sum())
+    if h5py.check_string_dtype(dtype):
+        keys = (block for _, block in iter_frame_index(frame))
+    elif dtype.kind in 'biufc':
+        keys = (_numeric_category_keys(np.asarray(block, dtype=dtype), allow_nan=True)
+                for _, block in iter_frame_index(frame))
+    else:
+        return int(frame.index.duplicated().sum())
+    return len(frame) - _distinct_labels(keys)
 
 
 def index_matches(frame, expected, rows=None, block_rows=8192):

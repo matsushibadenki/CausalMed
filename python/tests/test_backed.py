@@ -2,7 +2,7 @@
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import PropertyMock, patch
 
 try:
     import anndata as ad
@@ -86,6 +86,59 @@ class BackedTests(unittest.TestCase):
                     np.testing.assert_array_equal(np.flatnonzero(mask), [8194])
             finally:
                 projection.file.close()
+
+    def test_grouped_indices_stream_duplicate_counts_with_missing_values(self):
+        from anndata.io import write_elem
+        from causalmed_worker.backed import H5Frame, duplicate_frame_ids
+
+        fixtures = [
+            pd.array([2**63 + 1, None, 2**63 + 2] * 3000, dtype='UInt64'),
+            pd.array([True, None, False] * 3000, dtype='boolean'),
+            pd.array(['', None, '細胞'] * 3000, dtype='string'),
+            pd.Categorical.from_codes([1, -1, 0] * 3000, ['基準', '摂動']),
+            pd.Categorical.from_codes([1, -1, 0] * 3000, [-0.0, 1.5]),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            with h5py.File(Path(directory) / 'grouped.h5', 'w') as handle:
+                for ordinal, values in enumerate(fixtures):
+                    group = handle.create_group(str(ordinal))
+                    group.attrs['_index'] = 'ids'
+                    group.attrs['column-order'] = []
+                    with ad.settings.override(allow_write_nullable_strings=True):
+                        write_elem(group, 'ids', values)
+                    expected = int(pd.Index(values).duplicated().sum())
+                    with patch.object(H5Frame, 'index', new_callable=PropertyMock,
+                                      side_effect=AssertionError('full index read')):
+                        self.assertEqual(duplicate_frame_ids(H5Frame(group)), expected)
+
+    def test_streamed_numeric_indices_match_pandas_duplicate_counts(self):
+        from causalmed_worker.backed import H5Frame, LegacyFrame, duplicate_frame_ids
+
+        floats = np.arange(9000, dtype=np.float64)
+        floats[[0, 8192]] = [0.0, -0.0]
+        floats.view(np.uint64)[[1, 8193]] = [0x7ff8000000000001, 0xfff8000000000002]
+        integers = np.arange(9000, dtype=np.uint64) + 2**63
+        integers[-1] = integers[0]
+        complex_ids = np.arange(9000, dtype=np.complex128)
+        complex_ids[[0, 8192]] = [complex(0, -0.0), 0j]
+        complex_ids[[1, 8193]] = [complex(1, np.nan), complex(1, -np.nan)]
+        complex_ids[8194] = complex(2, np.nan)
+        complex_ids[[3, 8195]] = [complex(np.nan, 3), complex(-np.nan, 3)]
+        with tempfile.TemporaryDirectory() as directory:
+            with h5py.File(Path(directory) / 'indices.h5', 'w') as handle:
+                for values in (floats, integers, complex_ids):
+                    group = handle.create_group(values.dtype.name)
+                    group.attrs['_index'] = 'ids'
+                    group.attrs['column-order'] = []
+                    group['ids'] = values
+                    records = np.empty(len(values), dtype=[('index', values.dtype)])
+                    records['index'] = values
+                    legacy = handle.create_dataset(values.dtype.name + '-legacy', data=records)
+                    expected = int(pd.Index(values).duplicated().sum())
+                    for frame in (H5Frame(group), LegacyFrame(legacy)):
+                        with patch.object(type(frame), 'index', new_callable=PropertyMock,
+                                          side_effect=AssertionError('full index read')):
+                            self.assertEqual(duplicate_frame_ids(frame), expected)
 
     def test_streamed_feature_index_and_large_string_dictionary(self):
         from causalmed_worker.backed import annotation_group, duplicate_frame_ids
