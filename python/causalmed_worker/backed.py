@@ -116,6 +116,7 @@ VLEN_BLOCK_ROWS = 256
 
 VLEN_BYTE_LIMIT = 8 * 1024 * 1024
 ANNOTATION_SUMMARY_BYTES = 1024 * 1024
+CATEGORY_LABEL_CHUNK_BYTES = 64 * 1024
 _annotation_summary_read = ContextVar('annotation_summary_read', default=False)
 
 
@@ -135,6 +136,8 @@ def _vlen_hdf5():
     hid = ctypes.c_int64
     library.H5Pset_vlen_mem_manager.argtypes = [hid, allocate, ctypes.c_void_p, release, ctypes.c_void_p]
     library.H5Pset_vlen_mem_manager.restype = ctypes.c_int
+    library.H5Pset_buffer.argtypes = [hid, ctypes.c_size_t, ctypes.c_void_p, ctypes.c_void_p]
+    library.H5Pset_buffer.restype = ctypes.c_int
     for name in ('H5Dread', 'H5Dwrite'):
         function = getattr(library, name)
         function.argtypes = [hid, hid, hid, hid, hid, ctypes.c_void_p]
@@ -149,7 +152,7 @@ def _vlen_hdf5():
     return library, allocate, release
 
 
-def read_bounded_vlen(node, selection, *, field=None, decode=True, byte_limit=None):
+def read_bounded_vlen(node, selection, *, field=None, decode=True, byte_limit=None, borrow_text=False):
     """Read budgeted VLEN values or project a fixed-width compound leaf."""
     import ctypes
     import h5py
@@ -272,6 +275,12 @@ def read_bounded_vlen(node, selection, *, field=None, decode=True, byte_limit=No
         if element_count * ctypes.sizeof(element) > VLEN_BYTE_LIMIT:
             raise ValueError('vlen_budget_exceeded')
         output = (element * element_count)()
+        if borrow_text:
+            # One scalar only needs space for its on-disk and in-memory
+            # descriptors. The HDF5 VLEN converter manages the payload itself.
+            conversion_bytes = 4096 if element_count == 1 else CATEGORY_LABEL_CHUNK_BYTES
+            if library.H5Pset_buffer(transfer.id, conversion_bytes, None, None) < 0:
+                raise ValueError('invalid_h5ad')
         if library.H5Pset_vlen_mem_manager(transfer.id, allocate, None, release, None) < 0:
             raise ValueError('invalid_h5ad')
         status = library.H5Dread(node.id.id, memory_type.id, memory_space.id, file_space.id, transfer.id, output)
@@ -293,8 +302,16 @@ def read_bounded_vlen(node, selection, *, field=None, decode=True, byte_limit=No
                 continue
             if address and address not in owned:
                 raise ValueError('invalid_h5ad')
-            raw = ctypes.string_at(address) if address else b''
-            values[index] = raw.decode(info.encoding) if decode else raw
+            if borrow_text and address:
+                # The view owns the ctypes buffer after the read returns.
+                view = memoryview(owned[address]).cast('B')
+                length = int(np.frombuffer(view, dtype=np.uint8).argmin())
+                if view[length] != 0:
+                    raise ValueError('invalid_h5ad')
+                values[index] = view[:length]
+            else:
+                raw = ctypes.string_at(address) if address else b''
+                values[index] = raw.decode(info.encoding) if decode else raw
         return values.reshape(result_shape) if result_shape else values[0]
 
 
@@ -365,8 +382,8 @@ def copy_native_compound_tile(source, target, bounds):
         )
 
 
-def with_small_attribute_caches(files, transfer):
-    """Limit HDF5 heap caching while transferring a whole VLEN attribute."""
+def with_small_metadata_caches(files, transfer):
+    """Temporarily reduce HDF5 metadata caching during VLEN operations."""
     from h5py._objects import phil
 
     originals = []
@@ -520,16 +537,123 @@ class CategoryDictionary:
         constructor = pd.arrays.IntegerArray if self.encoding == 'nullable-integer' else pd.arrays.BooleanArray
         return constructor(values, mask)
 
-    def blocks(self):
+    def _validation_values(self, selection):
+        from codecs import decode, getincrementaldecoder
+
+        import h5py
+        import numpy as np
+
+        if self.mask is not None and np.any(self.mask[selection]):
+            raise ValueError('invalid_h5ad')
+        encoding = h5py.check_string_dtype(self.dtype).encoding
+        labels = read_bounded_vlen(self.values, selection, decode=False, borrow_text=True)
+        # Validate the original text encoding without keeping a decoded label
+        # alongside the bytes passed to SQLite.
+        decoder_type = getincrementaldecoder(encoding)
+        chunk_bytes = CATEGORY_LABEL_CHUNK_BYTES
+        for label in labels:
+            if len(label) <= chunk_bytes:
+                decode(label, encoding)
+                continue
+            decoder = decoder_type()
+            view = memoryview(label)
+            for start in range(0, len(view), chunk_bytes):
+                decoder.decode(view[start:start + chunk_bytes])
+            decoder.decode(b'', final=True)
+        return labels
+
+    def blocks(self, *, raw_text=False):
         step = string_block_rows(self.dtype, 8192)
-        for start in range(0, len(self), step):
-            yield from split_vlen_batch(start, min(start + step, len(self)),
-                                         lambda a, b: self[slice(a, b)])
+        if not raw_text:
+            for start in range(0, len(self), step):
+                yield from split_vlen_batch(
+                    start, min(start + step, len(self)), lambda a, b: self[slice(a, b)]
+                )
+            return
+
+        # Probe the first label before grouping reads. Once a batch fails,
+        # shrink subsequent reads instead of retrying each sibling range.
+        start, batch, largest = 0, 1, 1
+        budget = min(ANNOTATION_SUMMARY_BYTES, VLEN_BYTE_LIMIT)
+        while start < len(self):
+            stop = min(start + batch, len(self))
+            try:
+                values = self._validation_values(slice(start, stop))
+            except ValueError as error:
+                if str(error) != 'vlen_budget_exceeded' or stop - start == 1:
+                    raise
+                step = batch = max(1, (stop - start) // 2)
+                continue
+            largest = max(largest, max(len(label) + 1 for label in values))
+            yield start, values
+            del values
+            start = stop
+            batch = min(step, max(1, budget // largest))
+
+    def _validate_vlen_labels(self):
+        from contextlib import closing
+        from hashlib import sha256
+        import sqlite3
+        from tempfile import TemporaryFile
+
+        duplicate = False
+        with closing(sqlite3.connect('')) as database, TemporaryFile() as payloads:
+            database.execute('PRAGMA cache_size=-1024')
+            database.execute(
+                'CREATE TABLE labels (digest BLOB, length INTEGER, offset INTEGER, '
+                'PRIMARY KEY (digest, length, offset)) WITHOUT ROWID'
+            )
+            database.execute('CREATE TABLE short_labels (label BLOB PRIMARY KEY) WITHOUT ROWID')
+            buffer = memoryview(bytearray(CATEGORY_LABEL_CHUNK_BYTES))
+            for _, block in _bounded_annotation_blocks(self.blocks(raw_text=True)):
+                for label in block:
+                    if len(label) <= CATEGORY_LABEL_CHUNK_BYTES:
+                        inserted = database.execute(
+                            'INSERT OR IGNORE INTO short_labels VALUES (?)', (label,)
+                        )
+                        duplicate |= inserted.rowcount == 0
+                        continue
+                    digest = sha256(label).digest()
+                    view = memoryview(label)
+                    matches = database.execute(
+                        'SELECT offset FROM labels WHERE digest=? AND length=?', (digest, len(view))
+                    )
+                    # Spool distinct long labels once. Compare hash candidates
+                    # in bounded chunks without reloading a second HDF5 payload.
+                    for (offset,) in matches:
+                        payloads.seek(offset)
+                        for start in range(0, len(view), len(buffer)):
+                            expected = view[start:start + len(buffer)]
+                            actual = buffer[:len(expected)]
+                            if payloads.readinto(actual) != len(actual):
+                                raise OSError('short category validation read')
+                            same = actual == expected
+                            del expected
+                            if not same:
+                                break
+                        else:
+                            duplicate = True
+                            break
+                    else:
+                        offset = payloads.seek(0, 2)
+                        payloads.write(view)
+                        database.execute('INSERT INTO labels VALUES (?,?,?)', (digest, len(view), offset))
+                    del view
+                    matches.close()
+                # The loop variable otherwise pins the final native buffer.
+                if len(block):
+                    del label
+                del block
+        if duplicate:
+            raise ValueError('invalid_h5ad')
 
     def validate(self):
         import numpy as np
 
-        blocks = (values for _, values in self.blocks())
+        if is_vlen_string(self.dtype):
+            with_small_metadata_caches((self.values.file,), self._validate_vlen_labels)
+            return
+        blocks = (values for _, values in _bounded_annotation_blocks(self.blocks()))
         keys = blocks if self.text else (_numeric_category_keys(np.asarray(values, dtype=self.dtype)) for values in blocks)
         if _distinct_labels(keys) != len(self):
             raise ValueError('invalid_h5ad')
@@ -833,8 +957,8 @@ def annotation_schema(frame, key, block_rows=8192):
     return {'name': key, 'dtype': str(dtype)[:100], 'kind': kind, 'nullable': nullable}
 
 
-def _annotation_summary_blocks(frame, key, block_rows):
-    blocks = iter_annotation_column(frame, key, block_rows, include_index=False)
+def _bounded_annotation_blocks(blocks):
+    """Apply the smaller annotation budget only while advancing a read."""
     while True:
         token = _annotation_summary_read.set(True)
         try:
@@ -867,7 +991,9 @@ def annotation_group(frame, key, block_rows=8192):
         database.execute('CREATE TABLE counts (label TEXT PRIMARY KEY, count INTEGER NOT NULL, first_row INTEGER NOT NULL) WITHOUT ROWID')
         def count_rows():
             nonlocal missing, labels_fit
-            for start, block in _annotation_summary_blocks(frame, key, block_rows):
+            for start, block in _bounded_annotation_blocks(
+                iter_annotation_column(frame, key, block_rows, include_index=False)
+            ):
                 strings = block.astype('string')
                 missing += int(strings.isna().sum())
                 counts = strings.dropna().value_counts(sort=False)
@@ -975,6 +1101,31 @@ def _encoded_index_keys(block):
             yield str(value)
 
 
+def _duplicate_categorical_index_ids(frame, dictionary):
+    """Count seen category codes directly, reserving slot zero for missing IDs."""
+    import h5py
+    import numpy as np
+
+    codes = frame.index_node['codes']
+    if (not isinstance(codes, h5py.Dataset) or codes.shape != (len(frame),)
+            or not np.issubdtype(codes.dtype, np.integer)):
+        raise ValueError('invalid_h5ad')
+    if frame.index_key not in frame.validated_categories:
+        dictionary.validate()
+        frame.validated_categories.add(frame.index_key)
+
+    seen = scratch_vector(len(dictionary) + 1, np.bool_)
+    distinct = 0
+    for start in range(0, len(frame), 8192):
+        block = codes[start:start + 8192]
+        if np.any(block < -1) or np.any(block >= len(dictionary)):
+            raise ValueError('invalid_h5ad')
+        slots = np.unique(block).astype(np.intp, copy=False) + 1
+        distinct += int(np.count_nonzero(~seen[slots]))
+        seen[slots] = True
+    return len(frame) - distinct
+
+
 def duplicate_frame_ids(frame):
     import h5py
     import numpy as np
@@ -984,7 +1135,12 @@ def duplicate_frame_ids(frame):
     elif isinstance(frame, H5Frame) and isinstance(frame.index_node, h5py.Dataset) and frame.index_node.ndim == 1:
         dtype = frame.index_node.dtype
     elif isinstance(frame, H5Frame) and isinstance(frame.index_node, h5py.Group):
-        if not _supports_grouped_index(frame.index_node):
+        node = frame.index_node
+        if node.attrs.get('encoding-type') == 'categorical':
+            dictionary = projected_category_dictionary(node['categories'])
+            if dictionary is not None:
+                return _duplicate_categorical_index_ids(frame, dictionary)
+        if node.attrs.get('encoding-type') not in _NULLABLE_INDEX_ENCODINGS:
             return int(frame.index.duplicated().sum())
         keys = (_encoded_index_keys(block) for _, block in iter_frame_index(frame))
         return len(frame) - _distinct_labels(keys)

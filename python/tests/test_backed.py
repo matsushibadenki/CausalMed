@@ -111,6 +111,87 @@ class BackedTests(unittest.TestCase):
                                       side_effect=AssertionError('full index read')):
                         self.assertEqual(duplicate_frame_ids(H5Frame(group)), expected)
 
+    def test_category_validation_budgets_long_labels_and_checks_utf8(self):
+        from causalmed_worker.backed import CategoryDictionary, read_bounded_vlen
+
+        prefix = 'a' + '語' * 23000
+        with tempfile.TemporaryDirectory() as directory:
+            with h5py.File(Path(directory) / 'long-labels.h5', 'w') as handle:
+                labels = handle.create_dataset('labels', data=[prefix + '1', prefix + '2', prefix + '3'],
+                                               dtype=h5py.string_dtype())
+                original = handle.id.get_mdc_config()
+                dictionary = CategoryDictionary(labels)
+                read_labels = dictionary._validation_values
+
+                def read_with_cache_check(selection):
+                    self.assertLessEqual(handle.id.get_mdc_config().max_size, 1024 * 1024)
+                    return read_labels(selection)
+
+                with patch('causalmed_worker.backed.ANNOTATION_SUMMARY_BYTES', 1024), patch.object(
+                        dictionary, '_validation_values', side_effect=read_with_cache_check):
+                    dictionary.validate()
+                    self.assertEqual(handle.id.get_mdc_config().max_size, original.max_size)
+                    # A forced digest collision must not merge different labels.
+                    with patch('hashlib.sha256') as digest:
+                        digest.return_value.digest.return_value = b'collision'
+                        CategoryDictionary(labels).validate()
+                        labels[2] = prefix + '2'
+                        with patch('causalmed_worker.backed.read_bounded_vlen', wraps=read_bounded_vlen) as read:
+                            with self.assertRaisesRegex(ValueError, 'invalid_h5ad'):
+                                CategoryDictionary(labels).validate()
+                        single_reads = [call.args[1].start for call in read.call_args_list
+                                        if call.args[1].stop - call.args[1].start == 1]
+                        self.assertEqual(single_reads, [0, 1, 2])
+                        self.assertEqual(read.call_count, 3)
+                        labels[2] = prefix + '3'
+                    labels[1] = prefix + '1'
+                    with self.assertRaisesRegex(ValueError, 'invalid_h5ad'):
+                        CategoryDictionary(labels).validate()
+                    labels[1] = prefix.encode() + b'\xc3'
+                    with self.assertRaises(UnicodeDecodeError):
+                        dictionary.validate()
+                    restored = handle.id.get_mdc_config()
+                    self.assertEqual((restored.min_size, restored.max_size),
+                                     (original.min_size, original.max_size))
+
+    def test_category_validation_shrinks_reads_after_later_long_label(self):
+        from causalmed_worker.backed import CategoryDictionary
+
+        with tempfile.TemporaryDirectory() as directory:
+            with h5py.File(Path(directory) / 'mixed-labels.h5', 'w') as handle:
+                labels = handle.create_dataset(
+                    'labels', data=['a', '語' * 25000, '文' * 25000, '字' * 25000],
+                    dtype=h5py.string_dtype(),
+                )
+                dictionary = CategoryDictionary(labels)
+                with patch('causalmed_worker.backed.ANNOTATION_SUMMARY_BYTES', 1024), patch.object(
+                        dictionary, '_validation_values', wraps=dictionary._validation_values) as read:
+                    dictionary.validate()
+                slices = [(call.args[0].start, call.args[0].stop) for call in read.call_args_list]
+                self.assertEqual(slices, [(0, 1), (1, 4), (1, 2), (2, 3), (3, 4)])
+
+    def test_categorical_index_counts_codes_and_rejects_invalid_dictionaries(self):
+        from anndata.io import write_elem
+        from causalmed_worker.backed import H5Frame, duplicate_frame_ids
+
+        values = pd.Categorical.from_codes([2, -1, 0, 2, -1] * 1800, ['a', 'unused', 'b'])
+        with tempfile.TemporaryDirectory() as directory:
+            with h5py.File(Path(directory) / 'codes.h5', 'w') as handle:
+                handle.attrs['_index'] = 'ids'
+                handle.attrs['column-order'] = []
+                write_elem(handle, 'ids', values)
+                with patch('causalmed_worker.backed.iter_frame_index',
+                           side_effect=AssertionError('categorical labels expanded')):
+                    self.assertEqual(duplicate_frame_ids(H5Frame(handle)),
+                                     int(pd.Index(values).duplicated().sum()))
+                handle['ids/codes'][-1] = 3
+                with self.assertRaisesRegex(ValueError, 'invalid_h5ad'):
+                    duplicate_frame_ids(H5Frame(handle))
+                handle['ids/codes'][-1] = -1
+                handle['ids/categories'][1] = 'a'
+                with self.assertRaisesRegex(ValueError, 'invalid_h5ad'):
+                    duplicate_frame_ids(H5Frame(handle))
+
     def test_streamed_numeric_indices_match_pandas_duplicate_counts(self):
         from causalmed_worker.backed import H5Frame, LegacyFrame, duplicate_frame_ids
 

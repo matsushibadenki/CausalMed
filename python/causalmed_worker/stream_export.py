@@ -7,7 +7,7 @@ if 'index_matches' not in globals():
     from causalmed_worker.backed import (index_matches, read_research_frame, scratch_vector, LegacyFrame, H5Frame,
                                          configure_legacy_categories, string_block_rows, is_budgeted_vlen,
                                          read_bounded_vlen, projected_category_dictionary, CategoryDictionary, split_vlen_batch, VLEN_BLOCK_ROWS, vlen_byte_limit, copy_native_vlen_attribute,
-                                         copy_native_compound_tile, with_small_attribute_caches)
+                                         copy_native_compound_tile, with_small_metadata_caches)
 
 
 import math
@@ -201,7 +201,7 @@ class H5adStreamCopy:
                 value.fill(ref_type())
             elif (attribute.shape is not None and attribute.dtype.hasobject
                   and not attribute.get_type().detect_class(h5py.h5t.REFERENCE)):
-                with_small_attribute_caches(
+                with_small_metadata_caches(
                     (source.file, target.file),
                     lambda: copy_native_vlen_attribute(attribute, target, name),
                 )
