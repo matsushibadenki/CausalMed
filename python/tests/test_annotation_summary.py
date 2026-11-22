@@ -87,6 +87,65 @@ class AnnotationSummaryTests(unittest.TestCase):
             finally:
                 data.file.close()
 
+    def test_categorical_schema_validates_codes_without_expanding_rows(self):
+        frame = pd.DataFrame({'condition': pd.Categorical(['A', None, 'B'])},
+                             index=['a', 'b', 'c'])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'category-schema.synthetic.h5ad'
+            ad.AnnData(np.ones((3, 1)), obs=frame).write_h5ad(path)
+            data = open_research_h5ad(path)
+            try:
+                with patch('causalmed_worker.backed.iter_annotation_column',
+                           side_effect=AssertionError('expanded category rows')):
+                    self.assertEqual(annotation_schema(data.obs, 'condition', 1), {
+                        'name': 'condition', 'dtype': 'category', 'kind': 'categorical', 'nullable': True,
+                    })
+            finally:
+                data.file.close()
+
+    def test_legacy_categorical_schema_reuses_validated_nullability(self):
+        import h5py
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'legacy-schema.synthetic.h5ad'
+            obs = np.array([(b'a', 0, 1), (b'b', 1, 0), (b'c', -1, 1)],
+                           dtype=[('index', 'S1'), ('condition', 'i2'), ('donor', 'i2')])
+            with h5py.File(path, 'w') as handle:
+                handle['obs'] = obs
+                handle['var'] = np.array([(b'g',)], dtype=[('index', 'S1')])
+                handle['X'] = np.ones((3, 1))
+                handle['uns/condition_categories'] = ['A', 'B' * 70000]
+                handle['uns/donor_categories'] = [b'd1', b'd2']
+            original = ad.read_h5ad(path)
+            data = open_research_h5ad(path)
+            try:
+                with patch.object(data.obs, 'read', side_effect=AssertionError('reread legacy column')):
+                    for key in original.obs:
+                        self.assertEqual(annotation_schema(data.obs, key), {
+                            'name': key, 'dtype': str(original.obs[key].dtype),
+                            'kind': 'categorical', 'nullable': bool(original.obs[key].isna().any()),
+                        })
+            finally:
+                data.file.close()
+
+    def test_categorical_summary_counts_codes_and_keeps_first_seen_ties(self):
+        labels = ['a' * 70000, 'b' * 70000, 'unused']
+        frame = pd.DataFrame({
+            'condition': pd.Categorical([labels[1], None, labels[0], labels[0], labels[1]],
+                                        categories=labels),
+        }, index=list('abcde'))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'category-counts.synthetic.h5ad'
+            ad.AnnData(np.ones((5, 1)), obs=frame).write_h5ad(path)
+            data = open_research_h5ad(path)
+            try:
+                with patch('causalmed_worker.backed.iter_annotation_column',
+                           side_effect=AssertionError('expanded category rows')):
+                    self.assertEqual(annotation_group(data.obs, 'condition', 2),
+                                     reference(frame['condition']))
+            finally:
+                data.file.close()
+
     def test_corrupt_late_rows_are_not_skipped_after_a_missing_block(self):
         import h5py
         with tempfile.TemporaryDirectory() as directory:

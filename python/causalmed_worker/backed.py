@@ -676,6 +676,7 @@ class LegacyFrame:
         self.index_key, *columns = dataset.dtype.names
         self.columns = pd.Index(columns)
         self.categories = {}
+        self.category_nullable = {}
 
     def __len__(self):
         return len(self.dataset)
@@ -897,10 +898,12 @@ def configure_legacy_categories(obs, var, handle, *, exporting=False):
                           for start in range(0, len(frame), 8192))
             else:
                 blocks = (block.to_numpy() for _, block in iter_annotation_column(frame, label))
-            below_range = above_range = False
+            below_range = above_range = nullable = False
             for codes in blocks:
                 below_range |= bool(np.any(codes < -1))
                 above_range |= bool(np.any(codes >= len(categories)))
+                if isinstance(frame, LegacyFrame) and not nullable:
+                    nullable = bool(np.any(codes == -1))
             if above_range or (below_range and not exporting):
                 continue
             if below_range:
@@ -911,6 +914,7 @@ def configure_legacy_categories(obs, var, handle, *, exporting=False):
                     frame.categories[label] = categories
                 else:
                     frame.categories[label] = pd.CategoricalDtype(categories)
+                frame.category_nullable[label] = nullable
             else:
                 frame[label] = pd.Categorical.from_codes(frame[label].to_numpy(), categories)
             converted.add(key)
@@ -941,8 +945,26 @@ def open_research_h5ad(path):
 
 
 def annotation_schema(frame, key, block_rows=8192):
-    """Inspect dtype/nullability without expanding an entire modern column."""
+    """Inspect dtype and nullability without expanding categorical labels."""
     import pandas as pd
+
+    if isinstance(frame, LegacyFrame) and key in frame.category_nullable:
+        if block_rows < 1:
+            raise ValueError('invalid_h5ad')
+        return {
+            'name': key, 'dtype': 'category', 'kind': 'categorical',
+            'nullable': frame.category_nullable[key],
+        }
+
+    if isinstance(frame, H5Frame) and key in frame and frame.is_categorical(key):
+        node = frame.group[key]
+        dictionary = projected_category_dictionary(node['categories'])
+        if dictionary is not None:
+            nullable = False
+            for codes in _validated_category_codes(frame, key, node, dictionary, block_rows):
+                nullable |= bool((codes == -1).any())
+            return {'name': key, 'dtype': 'category', 'kind': 'categorical', 'nullable': nullable}
+
     dtype = None
     nullable = False
     for _, block in iter_annotation_column(frame, key, block_rows, include_index=False):
@@ -971,6 +993,91 @@ def _bounded_annotation_blocks(blocks):
         del block
 
 
+def _categorical_code_blocks(frame, key, block_rows):
+    if block_rows < 1:
+        raise ValueError('invalid_h5ad')
+    if isinstance(frame, LegacyFrame) and frame.is_categorical(key):
+        category = frame.categories[key]
+        dictionary = category if isinstance(category, CategoryDictionary) else category.categories
+        # configure_legacy_categories already checked the full code range.
+        return dictionary, (
+            frame.read(key, slice(start, start + block_rows))
+            for start in range(0, len(frame), block_rows)
+        )
+    if isinstance(frame, H5Frame) and key in frame and frame.is_categorical(key):
+        node = frame.group[key]
+        dictionary = projected_category_dictionary(node['categories'])
+        if dictionary is not None:
+            return dictionary, _validated_category_codes(frame, key, node, dictionary, block_rows)
+    return None
+
+
+def iter_annotation_matches(frame, key, values, block_rows=8192):
+    """Yield exact string-match masks, using category codes where available."""
+    from itertools import chain
+    import numpy as np
+    import pandas as pd
+
+    categorical = _categorical_code_blocks(frame, key, block_rows)
+    if categorical is None:
+        for start, block in iter_annotation_column(frame, key, block_rows, include_index=False):
+            yield start, block.astype('string').isin(values).to_numpy(dtype=bool)
+        return
+
+    dictionary, blocks = categorical
+    first = next(blocks, None)
+    if first is None:
+        return
+    matches = scratch_vector(len(dictionary) + 1, np.bool_)
+
+    def label_batches():
+        step = string_block_rows(dictionary.dtype, block_rows)
+        for start in range(0, len(dictionary), step):
+            yield from split_vlen_batch(start, min(start + step, len(dictionary)),
+                                        lambda a, b: dictionary[a:b])
+
+    for offset, labels in _bounded_annotation_blocks(label_batches()):
+        strings = pd.Series(pd.Categorical(labels), copy=False).astype('string')
+        matches[offset + 1:offset + 1 + len(labels)] = strings.isin(values).to_numpy(dtype=bool)
+        del labels, strings
+
+    start = 0
+    for codes in chain((first,), blocks):
+        yield start, matches[codes.astype(np.intp, copy=False) + 1]
+        start += len(codes)
+
+
+def _categorical_group_rows(blocks, dictionary, block_rows):
+    """Aggregate codes before decoding each referenced label once."""
+    import numpy as np
+    import pandas as pd
+
+    counts = scratch_vector(len(dictionary) + 1, np.int64)
+    first = scratch_vector(len(dictionary) + 1, np.int64)
+    offset = 0
+    for block in blocks:
+        codes, indices, frequencies = np.unique(block, return_index=True, return_counts=True)
+        slots = codes.astype(np.intp, copy=False) + 1
+        unseen = counts[slots] == 0
+        first[slots[unseen]] = offset + indices[unseen]
+        counts[slots] += frequencies
+        offset += len(block)
+    yield None, int(counts[0]), 0
+
+    step = string_block_rows(dictionary.dtype, block_rows)
+    for start in range(0, len(dictionary), step):
+        slots = np.flatnonzero(counts[start + 1:start + step + 1]) + start + 1
+        if not slots.size:
+            continue
+        for offset, labels in split_vlen_batch(
+            0, len(slots), lambda a, b: dictionary[slots[a:b] - 1]
+        ):
+            strings = pd.Series(pd.Categorical(labels), copy=False).astype('string')
+            for slot, label in zip(slots[offset:offset + len(labels)], strings):
+                yield str(label), int(counts[slot]), int(first[slot])
+            del labels, strings, label
+
+
 def annotation_group(frame, key, block_rows=8192):
     """Exact disk-backed counts with a cardinality-independent frequency cache.
 
@@ -991,6 +1098,18 @@ def annotation_group(frame, key, block_rows=8192):
         database.execute('CREATE TABLE counts (label TEXT PRIMARY KEY, count INTEGER NOT NULL, first_row INTEGER NOT NULL) WITHOUT ROWID')
         def count_rows():
             nonlocal missing, labels_fit
+            categorical = _categorical_code_blocks(frame, key, block_rows)
+            if categorical is not None:
+                dictionary, blocks = categorical
+                rows = _bounded_annotation_blocks(_categorical_group_rows(blocks, dictionary, block_rows))
+                for label, count, first_row in rows:
+                    if label is None:
+                        missing = count
+                    else:
+                        if labels_fit:
+                            labels_fit = len(label) <= 200 and len(label.encode('utf-8')) <= 200
+                        yield label, count, first_row
+                return
             for start, block in _bounded_annotation_blocks(
                 iter_annotation_column(frame, key, block_rows, include_index=False)
             ):
@@ -1006,7 +1125,7 @@ def annotation_group(frame, key, block_rows=8192):
                 del block, strings, counts
 
         database.executemany(
-            'INSERT INTO counts VALUES (?,?,?) ON CONFLICT(label) DO UPDATE SET count=count+excluded.count',
+            'INSERT INTO counts VALUES (?,?,?) ON CONFLICT(label) DO UPDATE SET count=count+excluded.count, first_row=min(first_row,excluded.first_row)',
             count_rows(),
         )
         distinct, total = database.execute('SELECT count(*), coalesce(sum(count),0) FROM counts').fetchone()
@@ -1101,25 +1220,35 @@ def _encoded_index_keys(block):
             yield str(value)
 
 
-def _duplicate_categorical_index_ids(frame, dictionary):
-    """Count seen category codes directly, reserving slot zero for missing IDs."""
+def _validated_category_codes(frame, key, node, dictionary, block_rows):
     import h5py
     import numpy as np
 
-    codes = frame.index_node['codes']
+    if block_rows < 1:
+        raise ValueError('invalid_h5ad')
+    codes = node['codes']
     if (not isinstance(codes, h5py.Dataset) or codes.shape != (len(frame),)
             or not np.issubdtype(codes.dtype, np.integer)):
         raise ValueError('invalid_h5ad')
-    if frame.index_key not in frame.validated_categories:
+    if key not in frame.validated_categories:
         dictionary.validate()
-        frame.validated_categories.add(frame.index_key)
-
-    seen = scratch_vector(len(dictionary) + 1, np.bool_)
-    distinct = 0
-    for start in range(0, len(frame), 8192):
-        block = codes[start:start + 8192]
+        frame.validated_categories.add(key)
+    for start in range(0, len(frame), block_rows):
+        block = codes[start:start + block_rows]
         if np.any(block < -1) or np.any(block >= len(dictionary)):
             raise ValueError('invalid_h5ad')
+        yield block
+
+
+def _duplicate_categorical_index_ids(frame, dictionary):
+    """Count seen category codes directly, reserving slot zero for missing IDs."""
+    import numpy as np
+
+    seen = None
+    distinct = 0
+    for block in _validated_category_codes(frame, frame.index_key, frame.index_node, dictionary, 8192):
+        if seen is None:
+            seen = scratch_vector(len(dictionary) + 1, np.bool_)
         slots = np.unique(block).astype(np.intp, copy=False) + 1
         distinct += int(np.count_nonzero(~seen[slots]))
         seen[slots] = True

@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
-from causalmed_worker.backed import H5Frame, iter_annotation_column
+from causalmed_worker.backed import H5Frame, iter_annotation_matches
 import anndata as ad
 import numpy as np
 import pandas as pd
@@ -24,7 +24,14 @@ class CohortExportTests(unittest.TestCase):
                 raw=json.dumps({'id':'00000000-0000-4000-8000-000000000001','sourceSha256':report['sha256'],'metadata':{'donorColumn':'donor','conditionColumn':'condition','perturbationColumn':'perturbation'},'conditionValue':'A','perturbationValue':'ctrl','alignment':{'observation':{'qcId':report['selection']['id'],'manifestSha256':report['selection']['manifestSha256']},'settings':{'mappings':[{'label':'D1','canonicalId':'QA-common-1','reviewed':False},{'label':'D2','canonicalId':'QA-common-2','reviewed':True}]}}},ensure_ascii=False)
                 definition={'json':raw,'sha256':hashlib.sha256(raw.encode()).hexdigest()}
                 output=folder/'cohort.h5ad'
-                with patch.object(H5Frame,'__getitem__',side_effect=AssertionError('Full column read during cohort selection')),patch('causalmed_worker.selection.iter_annotation_column',side_effect=lambda frame,key,**kwargs:iter_annotation_column(frame,key,2,**kwargs)):
+                with (
+                    patch.object(H5Frame, '__getitem__',
+                                 side_effect=AssertionError('Full column read during cohort selection')),
+                    patch('causalmed_worker.selection.iter_annotation_matches',
+                          side_effect=lambda frame, key, values: iter_annotation_matches(frame, key, values, 2)),
+                    patch('causalmed_worker.backed.iter_annotation_column',
+                          side_effect=AssertionError('Expanded cohort category labels')),
+                ):
                     receipt=export_selection(source,run,output,report['selection'],'export_cohort',definition=definition)
                 self.assertEqual((receipt['retained'],receipt['matched']),(2,3))
                 result=ad.read_h5ad(output);self.assertEqual(list(result.obs_names),['x','missing'])

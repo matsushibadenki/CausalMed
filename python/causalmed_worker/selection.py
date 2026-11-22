@@ -6,7 +6,7 @@ from pathlib import Path
 import uuid
 
 if 'open_research_h5ad' not in globals():
-    from causalmed_worker.backed import open_research_h5ad, iter_annotation_column, scratch_vector
+    from causalmed_worker.backed import open_research_h5ad, iter_annotation_matches, scratch_vector
 
 if 'DonorExportColumn' not in globals():
     from causalmed_worker.stream_export import DonorExportColumn
@@ -184,8 +184,8 @@ def export_selection(source, directory, output, expected, kind, progress=lambda 
                     column = payload['metadata'][role]
                     if not column or column not in data.obs or not isinstance(single, str) or not single.strip():
                         raise ValueError('invalid_export')
-                    for start, block in iter_annotation_column(data.obs, column, include_index=False):
-                        selected[start:start + len(block)] &= block.astype('string').isin(values).fillna(False).to_numpy(dtype=bool)
+                    for start, matches in iter_annotation_matches(data.obs, column, values):
+                        selected[start:start + len(matches)] &= matches
             finally:
                 data.file.close()
             matched = int(selected.sum())
