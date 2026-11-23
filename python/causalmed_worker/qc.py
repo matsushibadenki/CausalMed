@@ -2,7 +2,10 @@
 import math
 
 if 'iter_annotation_column' not in globals():
-    from causalmed_worker.backed import iter_annotation_column, iter_frame_index, scratch_vector
+    from causalmed_worker.backed import (
+        categorical_group_rows, iter_annotation_column, iter_annotation_predicate,
+        iter_frame_index, scratch_vector, text_block_width,
+    )
 
 
 def qc_options(options=None):
@@ -73,18 +76,24 @@ def _histogram(values, cutoff_min=None, cutoff_max=None, log=False, included=Non
 def mitochondrial_mask(frame, column, prefix, block_rows=8192):
     """Convert feature labels in blocks and retain only the Boolean mask."""
     import numpy as np
+    prefix = prefix.upper()
+
+    def matches_prefix(labels):
+        return labels.str.upper().str.startswith(prefix, na=False)
+
     if column == '_index':
-        blocks = iter_frame_index(frame, block_rows)
+        blocks = (
+            (start, matches_prefix(block.astype('string')).to_numpy(dtype=bool))
+            for start, block in iter_frame_index(frame, block_rows)
+        )
     elif column in frame:
-        blocks = iter_annotation_column(frame, column, block_rows, include_index=False)
+        blocks = iter_annotation_predicate(frame, column, matches_prefix, block_rows)
     else:
         raise ValueError('invalid_gene_column')
 
     mask = np.empty(len(frame), dtype=bool)
-    prefix = prefix.upper()
-    for start, block in blocks:
-        matches = block.astype('string').str.upper().str.startswith(prefix, na=False)
-        mask[start:start + len(block)] = matches.to_numpy(dtype=bool)
+    for start, matches in blocks:
+        mask[start:start + len(matches)] = matches
     return mask
 
 
@@ -231,7 +240,7 @@ def accumulate_qc_block(block, occupied, row_origin, mito_columns, totals, detec
             mito_totals[target] += np.asarray(part[:, mito_columns].sum(axis=1, dtype=np.float64)).ravel()
 
 
-def quality_control(data, options, progress=lambda percent, phase: None, selection_callback=None, *, stream_selection=False):
+def quality_control(data, options, progress=lambda percent, phase: None, selection_callback=None, *, stream_selection=False, cell_id_width=None):
     import numpy as np
     from scipy import sparse
     o = qc_options(options)
@@ -330,8 +339,10 @@ def quality_control(data, options, progress=lambda percent, phase: None, selecti
             metrics['mito'] = _histogram(mito_totals, None, o['maxMitoPct'], included=lambda block: totals[block] > 0)
     donor = {'column': o['donorColumn'], 'distinct': 0, 'missing': n, 'missingRetained': None,
              'groups': [], 'otherCells': 0, 'identityVerified': False, 'inventoryComplete': False}
+    donor_width = 1
     if o['donorColumn']:
-        donor.update(donor_summary(data.obs, o['donorColumn'], passed, valid))
+        summary, donor_width = _donor_summary(data.obs, o['donorColumn'], passed, valid, 8192)
+        donor.update(summary)
     if valid and selection_callback is not None:
         def missing_mito_blocks():
             for start in range(0, n, 8192):
@@ -349,22 +360,33 @@ def quality_control(data, options, progress=lambda percent, phase: None, selecti
             for _, block in iter_frame_index(data.obs):
                 yield block
 
+        def missing_donor_blocks():
+            if o['donorColumn']:
+                blocks = iter_annotation_predicate(
+                    data.obs, o['donorColumn'],
+                    lambda labels: labels.map(lambda value: not isinstance(value, str) or not value.strip()),
+                    missing=True,
+                )
+                for _, block in blocks:
+                    yield block
+            else:
+                for start in range(0, n, 8192):
+                    yield np.ones(min(n - start, 8192), dtype=bool)
+
+        cell_ids = (qc_text_array(n, cell_blocks) if cell_id_width is None
+                    else QcArray(n, f'U{cell_id_width}', cell_blocks))
         arrays = {
             'source_row': QcArray(n, np.int_, lambda: (
                 np.arange(start, min(start + 8192, n)) for start in range(0, n, 8192)
             )),
-            'cell_id': qc_text_array(n, cell_blocks),
+            'cell_id': cell_ids,
             'retained': passed,
             'reason_bits': reason_bits,
             'total_counts': totals,
             'detected_genes': detected,
             'mito_percent': mito_totals if available_mito else QcArray(n, np.float64, missing_mito_blocks),
-            'donor_id': qc_text_array(n, donor_blocks),
-            'donor_missing': QcArray(n, np.bool_, lambda: (
-                np.fromiter((not value.strip() for value in block),
-                            dtype=bool, count=len(block))
-                for block in donor_blocks()
-            )),
+            'donor_id': QcArray(n, f'U{donor_width}', donor_blocks),
+            'donor_missing': QcArray(n, np.bool_, missing_donor_blocks),
         }
         if not stream_selection:
             arrays = {key: value.materialize() if isinstance(value, QcArray) else value
@@ -416,18 +438,19 @@ class QcArray:
 
 
 def qc_text_array(length, blocks):
-    import numpy as np
-    width = 1
-    for block in blocks():
-        if block.dtype.kind in ('O', 'U', 'T'):
-            width = max(width, max((len(str(value)) for value in block), default=0))
-        else:
-            width = max(width, np.asarray(block, dtype=str).dtype.itemsize // 4)
+    width = max((text_block_width(block) for block in blocks()), default=1)
+    width = max(1, width)
     return QcArray(length, f'U{width}', blocks)
 
 
 def donor_summary(frame, key, passed, valid=True, block_rows=8192):
-    """Exact donor totals/retention, with disk-backed distinct-label counts.
+    """Return exact donor totals and retention."""
+    summary, _ = _donor_summary(frame, key, passed, valid, block_rows)
+    return summary
+
+
+def _donor_summary(frame, key, passed, valid, block_rows):
+    """Count donors and capture the width of the raw IDs in the same scan.
 
     Only missing/blank values are absent; nonblank labels retain whitespace.
     Ties use source-first order, independent of processing block size.
@@ -440,26 +463,48 @@ def donor_summary(frame, key, passed, valid=True, block_rows=8192):
         raise ValueError('invalid_h5ad')
     missing = missing_retained = 0
     labels_fit = True
+    raw_width = 1
     with closing(sqlite3.connect('')) as database:
         database.execute('PRAGMA cache_size=-1024')
         database.execute('PRAGMA temp_store=FILE')
         database.execute('CREATE TABLE counts (label TEXT PRIMARY KEY, cells INTEGER NOT NULL, retained INTEGER NOT NULL, first_row INTEGER NOT NULL) WITHOUT ROWID')
-        for start, block in iter_annotation_column(frame, key, block_rows, include_index=False):
-            labels = block.astype('string')
-            absent = labels.isna() | labels.str.strip().eq('').fillna(True)
-            retained_mask = passed[start:start + len(block)]
-            missing += int(absent.sum())
-            if valid:
-                missing_retained += int((absent.to_numpy(dtype=bool) & retained_mask).sum())
-            labels = labels.mask(absent)
-            counts = labels.value_counts(sort=False)
-            retained = labels.iloc[retained_mask].value_counts(sort=False) if valid else None
-            rows = []
-            for ordinal, (label, count) in enumerate(counts.items()):
-                label = str(label)
-                labels_fit &= len(label.encode('utf-8')) <= 200
-                rows.append((label, int(count), int(retained.get(label, 0)) if valid else 0, start + ordinal))
-            database.executemany('INSERT INTO counts VALUES (?,?,?,?) ON CONFLICT(label) DO UPDATE SET cells=cells+excluded.cells, retained=retained+excluded.retained', rows)
+        def count_rows():
+            nonlocal labels_fit, missing, missing_retained, raw_width
+            rows = categorical_group_rows(frame, key, block_rows, passed if valid else None)
+            if rows is not None:
+                for label, cells, first_row, retained in rows:
+                    if label is not None:
+                        raw_width = max(raw_width, len(label))
+                    if label is None or not label.strip():
+                        missing += cells
+                        missing_retained += retained
+                    else:
+                        labels_fit &= len(label.encode('utf-8')) <= 200
+                        yield label, cells, retained, first_row
+                return
+            for start, block in iter_annotation_column(frame, key, block_rows, include_index=False):
+                labels = block.astype('string')
+                block_width = max((len(label) for label in labels if isinstance(label, str)), default=0)
+                raw_width = max(raw_width, block_width)
+                absent = labels.isna() | labels.str.strip().eq('').fillna(True)
+                retained_mask = passed[start:start + len(block)]
+                missing += int(absent.sum())
+                if valid:
+                    missing_retained += int((absent.to_numpy(dtype=bool) & retained_mask).sum())
+                labels = labels.mask(absent)
+                counts = labels.value_counts(sort=False)
+                retained = labels.iloc[retained_mask].value_counts(sort=False) if valid else None
+                for ordinal, (label, count) in enumerate(counts.items()):
+                    label = str(label)
+                    labels_fit &= len(label.encode('utf-8')) <= 200
+                    yield label, int(count), int(retained.get(label, 0)) if valid else 0, start + ordinal
+
+        database.executemany(
+            'INSERT INTO counts VALUES (?,?,?,?) ON CONFLICT(label) DO UPDATE SET '
+            'cells=cells+excluded.cells, retained=retained+excluded.retained, '
+            'first_row=min(first_row,excluded.first_row)',
+            count_rows(),
+        )
         distinct, total = database.execute('SELECT count(*), coalesce(sum(cells),0) FROM counts').fetchone()
         top = database.execute('SELECT label,cells,retained FROM counts ORDER BY cells DESC,first_row ASC LIMIT 30').fetchall()
     return {'distinct': distinct, 'missing': missing,
@@ -467,7 +512,7 @@ def donor_summary(frame, key, passed, valid=True, block_rows=8192):
             'otherCells': total - sum(count for _, count, _ in top),
             'inventoryComplete': distinct <= 30 and labels_fit,
             'groups': [{'label': label[:200], 'cells': count, 'retained': retained if valid else None}
-                       for label, count, retained in top]}
+                       for label, count, retained in top]}, raw_width
 
 
 def donor_selection(frame, key, block_rows=8192):

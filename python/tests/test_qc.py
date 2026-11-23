@@ -17,6 +17,25 @@ from causalmed_worker.h5ad import inspect
 
 @unittest.skipIf(ad is None, 'Install python/requirements.txt for QC tests')
 class ExpressionQcTests(unittest.TestCase):
+    def test_categorical_mitochondrial_prefix_uses_dictionary_labels(self):
+        from unittest.mock import patch
+        from causalmed_worker.backed import open_research_h5ad
+        from causalmed_worker.qc import mitochondrial_mask
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'mitochondrial.synthetic.h5ad'
+            data = self.make_data()
+            data.var['symbols'] = pd.Categorical(['mT-X', None, ' mt-X', 'mT-X'])
+            data.write_h5ad(path)
+            backed = open_research_h5ad(path)
+            try:
+                with patch('causalmed_worker.backed.iter_annotation_column',
+                           side_effect=AssertionError('expanded categorical feature labels')):
+                    mask = mitochondrial_mask(backed.var, 'symbols', 'mt-', block_rows=2)
+                np.testing.assert_array_equal(mask, [True, False, False, True])
+            finally:
+                backed.file.close()
+
     def make_data(self, constructor=None):
         constructor = constructor or np.asarray
         matrix = np.array([[1,4,0,0],[0,0,0,0],[3,1,1,0],[0,10,20,0],[0,2,0,0]],dtype=float)

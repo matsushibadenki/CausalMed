@@ -8,7 +8,7 @@ from pathlib import Path
 import sys
 
 if 'open_research_h5ad' not in globals():
-    from causalmed_worker.backed import open_research_h5ad, categorical_columns, annotation_schema, annotation_group, duplicate_frame_ids
+    from causalmed_worker.backed import open_research_h5ad, categorical_columns, annotation_schema, annotation_group, duplicate_frame_ids, frame_id_stats
 
 
 def emit(message):
@@ -66,8 +66,9 @@ def inspect(path, progress=lambda percent, phase: None, options=None, expected_s
             groups[str(key)[:200]] = annotation_group(data.obs, key)
             progress(65 + int(5 * (index + 1) / max(len(candidates), 1)), 'annotations')
         selection = {}
+        duplicate_cells, cell_id_width = frame_id_stats(data.obs, measure_width=artifact_dir is not None)
         qc = quality_control(data, options, progress, selection.update if artifact_dir else None,
-                             stream_selection=True)
+                             stream_selection=True, cell_id_width=cell_id_width)
         # Bind bounded annotation context to the immutable QC manifest.
         qc['annotationContext'] = {key: {**group, 'counts': group['counts'] if group['complete'] and group['distinct'] == 1 else []} for key, group in groups.items()}
         progress(95, 'validating')
@@ -75,7 +76,7 @@ def inspect(path, progress=lambda percent, phase: None, options=None, expected_s
                 'bytes': before.st_size, 'cells': data.n_obs, 'genes': data.n_vars,
                 'obsColumns': [c[:200] for c in columns[:200]], 'totalObsColumns': len(columns),
                 'obsSchema': obs_schema, 'obsSchemaTruncated': len(obs_schema) < len(columns),
-                'duplicateCellIds': duplicate_frame_ids(data.obs),
+                'duplicateCellIds': duplicate_cells,
                 'duplicateGeneIds': duplicate_frame_ids(data.var), 'groups': groups,
                 'synthetic': None, 'validation': 'expression_qc', 'anndataVersion': version('anndata'),
                 'matrices': ['X'] + (['raw'] if data.raw is not None else []) + ['layer:' + str(k) for k in list(data.layers)[:30]],

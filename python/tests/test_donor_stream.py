@@ -32,7 +32,8 @@ class DonorStreamTests(unittest.TestCase):
     def test_typed_missing_whitespace_identity_and_raw_arrays_across_blocks(self):
         columns={
             'text':pd.array(['D1',' D1','D1 ',None,'','\t','\u2003','中文','😀','x'*201],dtype='string'),
-            'category':pd.Categorical(['B','A',None,'B','A','C','C','B','A','B'],categories=['unused','C','A','B'],ordered=True),
+            'category':pd.Categorical(['B','A',None,'B','A','C',' C','\u2003','A','B'],
+                                       categories=['unused',' C','C','A','B','\u2003'],ordered=True),
             'integer':pd.array([1,2,None,1,3,2,3,1,2,3],dtype='Int64'),
             'boolean':pd.array([True,False,None,True,False,False,True,False,True,False],dtype='boolean'),
             'float':[1.,np.nan,2.,1.,3.,3.,2.,1.,3.,2.],
@@ -73,7 +74,12 @@ class DonorStreamTests(unittest.TestCase):
         for matrix in [np.asarray,sparse.csr_matrix,sparse.csc_matrix]:
             with self.subTest(matrix=matrix.__name__),tempfile.TemporaryDirectory() as directory:
                 source=Path(directory)/'qc.synthetic.h5ad'
-                obs=pd.DataFrame({'donor':['D1',None,' D1','D1 ','\t']},index=['a','b','c','d','e'])
+                blank = '\t' * 8
+                obs=pd.DataFrame({'donor':pd.Categorical(
+                    ['D1', None, ' D1', 'D1 ', blank],
+                    categories=['D1', ' D1', 'D1 ', blank, 'unused-long-category'],
+                )},
+                                 index=['a','b','c','d','e'])
                 original=ad.AnnData(matrix([[1,2],[0,0],[3,4],[0,2],[3,4]]),obs=obs,var=pd.DataFrame(index=['MT-A','B']))
                 original.write_h5ad(source)
                 data=open_research_h5ad(source);saved={}
@@ -85,7 +91,8 @@ class DonorStreamTests(unittest.TestCase):
                     data.file.close()
                 self.assertEqual(result['donor'],quality_control(original,options)['donor'])
                 np.testing.assert_array_equal(saved['retained'],[True,False,True,True,True])
-                np.testing.assert_array_equal(saved['donor_id'],['D1','',' D1','D1 ','\t'])
+                np.testing.assert_array_equal(saved['donor_id'], ['D1', '', ' D1', 'D1 ', blank])
+                self.assertEqual(saved['donor_id'].dtype, np.dtype('U8'))
                 np.testing.assert_array_equal(saved['donor_missing'],[False,True,False,False,True])
                 self.assertEqual(result['donor']['missingRetained'],1)
                 self.assertFalse(result['donor']['identityVerified'])
@@ -131,4 +138,6 @@ class DonorStreamTests(unittest.TestCase):
             with np.load(Path(directory)/'cells.npz',allow_pickle=False) as saved:
                 np.testing.assert_array_equal(saved['retained'],passed)
                 np.testing.assert_array_equal(saved['donor_id'],original.obs.replicate.astype('string').fillna('').to_numpy(dtype=str))
+                np.testing.assert_array_equal(saved['donor_missing'],
+                                              original.obs.replicate.astype('string').fillna('').str.strip().eq(''))
         self.assertEqual(hashlib.sha256(source.read_bytes()).hexdigest(),before)

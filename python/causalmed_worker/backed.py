@@ -1013,7 +1013,12 @@ def _categorical_code_blocks(frame, key, block_rows):
 
 
 def iter_annotation_matches(frame, key, values, block_rows=8192):
-    """Yield exact string-match masks, using category codes where available."""
+    """Yield exact string-match masks, excluding missing values."""
+    yield from iter_annotation_predicate(frame, key, lambda labels: labels.isin(values), block_rows)
+
+
+def iter_annotation_predicate(frame, key, predicate, block_rows=8192, *, missing=False):
+    """Apply a string predicate to dictionary entries or bounded row blocks."""
     from itertools import chain
     import numpy as np
     import pandas as pd
@@ -1021,7 +1026,7 @@ def iter_annotation_matches(frame, key, values, block_rows=8192):
     categorical = _categorical_code_blocks(frame, key, block_rows)
     if categorical is None:
         for start, block in iter_annotation_column(frame, key, block_rows, include_index=False):
-            yield start, block.astype('string').isin(values).to_numpy(dtype=bool)
+            yield start, predicate(block.astype('string')).to_numpy(dtype=bool, na_value=missing)
         return
 
     dictionary, blocks = categorical
@@ -1029,6 +1034,7 @@ def iter_annotation_matches(frame, key, values, block_rows=8192):
     if first is None:
         return
     matches = scratch_vector(len(dictionary) + 1, np.bool_)
+    matches[0] = missing
 
     def label_batches():
         step = string_block_rows(dictionary.dtype, block_rows)
@@ -1038,7 +1044,9 @@ def iter_annotation_matches(frame, key, values, block_rows=8192):
 
     for offset, labels in _bounded_annotation_blocks(label_batches()):
         strings = pd.Series(pd.Categorical(labels), copy=False).astype('string')
-        matches[offset + 1:offset + 1 + len(labels)] = strings.isin(values).to_numpy(dtype=bool)
+        matches[offset + 1:offset + 1 + len(labels)] = predicate(strings).to_numpy(
+            dtype=bool, na_value=missing
+        )
         del labels, strings
 
     start = 0
@@ -1047,13 +1055,25 @@ def iter_annotation_matches(frame, key, values, block_rows=8192):
         start += len(codes)
 
 
-def _categorical_group_rows(blocks, dictionary, block_rows):
+def categorical_group_rows(frame, key, block_rows, retained_mask=None):
+    """Return bounded categorical counts, or None for the compatibility path."""
+    categorical = _categorical_code_blocks(frame, key, block_rows)
+    if categorical is None:
+        return None
+    dictionary, blocks = categorical
+    return _bounded_annotation_blocks(
+        _categorical_group_rows(blocks, dictionary, block_rows, retained_mask)
+    )
+
+
+def _categorical_group_rows(blocks, dictionary, block_rows, retained_mask):
     """Aggregate codes before decoding each referenced label once."""
     import numpy as np
     import pandas as pd
 
     counts = scratch_vector(len(dictionary) + 1, np.int64)
     first = scratch_vector(len(dictionary) + 1, np.int64)
+    retained = scratch_vector(len(dictionary) + 1, np.int64) if retained_mask is not None else None
     offset = 0
     for block in blocks:
         codes, indices, frequencies = np.unique(block, return_index=True, return_counts=True)
@@ -1061,8 +1081,13 @@ def _categorical_group_rows(blocks, dictionary, block_rows):
         unseen = counts[slots] == 0
         first[slots[unseen]] = offset + indices[unseen]
         counts[slots] += frequencies
+        if retained is not None:
+            codes, frequencies = np.unique(
+                block[retained_mask[offset:offset + len(block)]], return_counts=True
+            )
+            retained[codes.astype(np.intp, copy=False) + 1] += frequencies
         offset += len(block)
-    yield None, int(counts[0]), 0
+    yield None, int(counts[0]), 0, int(retained[0]) if retained is not None else 0
 
     step = string_block_rows(dictionary.dtype, block_rows)
     for start in range(0, len(dictionary), step):
@@ -1074,7 +1099,7 @@ def _categorical_group_rows(blocks, dictionary, block_rows):
         ):
             strings = pd.Series(pd.Categorical(labels), copy=False).astype('string')
             for slot, label in zip(slots[offset:offset + len(labels)], strings):
-                yield str(label), int(counts[slot]), int(first[slot])
+                yield str(label), int(counts[slot]), int(first[slot]), int(retained[slot]) if retained is not None else 0
             del labels, strings, label
 
 
@@ -1098,11 +1123,9 @@ def annotation_group(frame, key, block_rows=8192):
         database.execute('CREATE TABLE counts (label TEXT PRIMARY KEY, count INTEGER NOT NULL, first_row INTEGER NOT NULL) WITHOUT ROWID')
         def count_rows():
             nonlocal missing, labels_fit
-            categorical = _categorical_code_blocks(frame, key, block_rows)
-            if categorical is not None:
-                dictionary, blocks = categorical
-                rows = _bounded_annotation_blocks(_categorical_group_rows(blocks, dictionary, block_rows))
-                for label, count, first_row in rows:
+            rows = categorical_group_rows(frame, key, block_rows)
+            if rows is not None:
+                for label, count, first_row, _ in rows:
                     if label is None:
                         missing = count
                     else:
@@ -1240,24 +1263,81 @@ def _validated_category_codes(frame, key, node, dictionary, block_rows):
         yield block
 
 
-def _duplicate_categorical_index_ids(frame, dictionary):
+def _categorical_index_stats(frame, dictionary, measure_width):
     """Count seen category codes directly, reserving slot zero for missing IDs."""
     import numpy as np
+    import pandas as pd
 
     seen = None
     distinct = 0
-    for block in _validated_category_codes(frame, frame.index_key, frame.index_node, dictionary, 8192):
+    mixed_missing = False
+    projected_width = measure_width and dictionary.mask is not None
+    block_rows = string_block_rows(dictionary.dtype, 8192) if projected_width else 8192
+    for block in _validated_category_codes(frame, frame.index_key, frame.index_node, dictionary, block_rows):
         if seen is None:
             seen = scratch_vector(len(dictionary) + 1, np.bool_)
         slots = np.unique(block).astype(np.intp, copy=False) + 1
         distinct += int(np.count_nonzero(~seen[slots]))
         seen[slots] = True
-    return len(frame) - distinct
+        if projected_width and len(slots) > 1 and slots[0] == 0:
+            mixed_missing = True
+    width = None
+    if measure_width:
+        # Missing-only projected blocks have an empty category index and yield NaN.
+        width = 3 if seen is not None and seen[0] else 1
+        if seen is not None:
+            for _, labels in _bounded_annotation_blocks(_seen_index_labels(dictionary, seen)):
+                categories = pd.Index(labels)
+                width = max(width, max(len(str(label)) for label in categories))
+                if mixed_missing:
+                    # Short strings cannot trigger the byte-budget split that
+                    # could otherwise separate missing codes from present labels.
+                    missing = pd.Categorical.from_codes([-1], categories=categories)
+                    width = max(width, len(str(next(iter(missing)))))
+                    mixed_missing = False
+                del labels
+                del categories
+    return len(frame) - distinct, width
+
+
+def _seen_index_labels(dictionary, seen):
+    import numpy as np
+
+    step = string_block_rows(dictionary.dtype, 8192)
+    for start in range(0, len(dictionary), step):
+        codes = np.flatnonzero(seen[start + 1:start + step + 1]) + start
+        if codes.size:
+            yield from split_vlen_batch(0, len(codes), lambda a, b: dictionary[codes[a:b]])
+
+
+def text_block_width(block):
+    import numpy as np
+
+    if block.dtype.kind in ('O', 'U', 'T'):
+        return max((len(str(value)) for value in block), default=0)
+    return np.asarray(block, dtype=str).dtype.itemsize // 4
 
 
 def duplicate_frame_ids(frame):
+    return frame_id_stats(frame)[0]
+
+
+def frame_id_stats(frame, *, measure_width=False):
+    """Count duplicates and optionally measure text width during the same read."""
     import h5py
     import numpy as np
+
+    def streamed_stats(encode):
+        width = 1
+        def keys():
+            nonlocal width
+            for _, block in iter_frame_index(frame):
+                if measure_width:
+                    width = max(width, text_block_width(block))
+                yield encode(block)
+
+        distinct = _distinct_labels(keys())
+        return len(frame) - distinct, width if measure_width else None
 
     if isinstance(frame, LegacyFrame):
         dtype = frame.dtype(frame.index_key)
@@ -1268,26 +1348,25 @@ def duplicate_frame_ids(frame):
         if node.attrs.get('encoding-type') == 'categorical':
             dictionary = projected_category_dictionary(node['categories'])
             if dictionary is not None:
-                return _duplicate_categorical_index_ids(frame, dictionary)
+                return _categorical_index_stats(frame, dictionary, measure_width)
         if node.attrs.get('encoding-type') not in _NULLABLE_INDEX_ENCODINGS:
-            return int(frame.index.duplicated().sum())
-        keys = (_encoded_index_keys(block) for _, block in iter_frame_index(frame))
-        return len(frame) - _distinct_labels(keys)
+            return int(frame.index.duplicated().sum()), None
+        return streamed_stats(_encoded_index_keys)
     else:
-        return int(frame.index.duplicated().sum())
+        return int(frame.index.duplicated().sum()), None
 
     if h5py.check_string_dtype(dtype):
-        keys = (block for _, block in iter_frame_index(frame))
-    elif dtype.kind in 'biufc':
-        keys = (_numeric_category_keys(np.asarray(block, dtype=dtype), allow_nan=True)
-                for _, block in iter_frame_index(frame))
-    else:
-        return int(frame.index.duplicated().sum())
-    return len(frame) - _distinct_labels(keys)
+        return streamed_stats(lambda block: block)
+    if dtype.kind in 'biufc':
+        return streamed_stats(
+            lambda block: _numeric_category_keys(np.asarray(block, dtype=dtype), allow_nan=True)
+        )
+    return int(frame.index.duplicated().sum()), None
 
 
 def index_matches(frame, expected, rows=None, block_rows=8192):
     import numpy as np
+    import pandas as pd
 
     if len(frame) != (len(expected) if rows is None else len(rows)):
         return False
@@ -1295,7 +1374,14 @@ def index_matches(frame, expected, rows=None, block_rows=8192):
         selection = slice(start, start + len(block))
         if rows is not None:
             selection = rows[selection]
-        if not np.array_equal(np.asarray(block, dtype=str), expected[selection]):
+        dtype = str
+        if isinstance(block.dtype, pd.CategoricalDtype):
+            # NumPy may cast integer categories with missing codes through
+            # floats when inferring width. Use the saved NPZ conversion.
+            dtype = expected.dtype
+            if text_block_width(block) > dtype.itemsize // 4:
+                return False
+        if not np.array_equal(np.asarray(block, dtype=dtype), expected[selection]):
             return False
     return True
 

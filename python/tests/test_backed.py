@@ -172,9 +172,9 @@ class BackedTests(unittest.TestCase):
 
     def test_categorical_index_counts_codes_and_rejects_invalid_dictionaries(self):
         from anndata.io import write_elem
-        from causalmed_worker.backed import H5Frame, duplicate_frame_ids
+        from causalmed_worker.backed import H5Frame, duplicate_frame_ids, frame_id_stats
 
-        values = pd.Categorical.from_codes([2, -1, 0, 2, -1] * 1800, ['a', 'unused', 'b'])
+        values = pd.Categorical.from_codes([2, -1, 0, 2, -1] * 1800, ['a', 'unused-long-label', 'b'])
         with tempfile.TemporaryDirectory() as directory:
             with h5py.File(Path(directory) / 'codes.h5', 'w') as handle:
                 handle.attrs['_index'] = 'ids'
@@ -184,6 +184,8 @@ class BackedTests(unittest.TestCase):
                            side_effect=AssertionError('categorical labels expanded')):
                     self.assertEqual(duplicate_frame_ids(H5Frame(handle)),
                                      int(pd.Index(values).duplicated().sum()))
+                    self.assertEqual(frame_id_stats(H5Frame(handle), measure_width=True),
+                                     (int(pd.Index(values).duplicated().sum()), 3))
                 handle['ids/codes'][-1] = 3
                 with self.assertRaisesRegex(ValueError, 'invalid_h5ad'):
                     duplicate_frame_ids(H5Frame(handle))
@@ -191,6 +193,48 @@ class BackedTests(unittest.TestCase):
                 handle['ids/categories'][1] = 'a'
                 with self.assertRaisesRegex(ValueError, 'invalid_h5ad'):
                     duplicate_frame_ids(H5Frame(handle))
+
+    def test_numeric_and_nullable_category_index_width_matches_row_projection(self):
+        from anndata.io import write_elem
+        from causalmed_worker.backed import (
+            H5Frame, frame_id_stats, index_matches, iter_frame_index, text_block_width,
+        )
+
+        for categories in (np.array([0.1, 0.2, 0.3], dtype=np.float32),
+                           pd.array([1, 2, 30000], dtype='Int64'),
+                           pd.array(['a', '字', 'unused-long'], dtype='string'),
+                           pd.array([True, False], dtype='boolean')):
+            for codes in ([1, -1, 0, 1], [-1] * 8192 + [0, 1]):
+                with self.subTest(dtype=categories.dtype, rows=len(codes)), tempfile.TemporaryDirectory() as directory:
+                    with h5py.File(Path(directory) / 'categories.h5', 'w') as handle:
+                        handle.attrs['_index'] = 'ids'
+                        handle.attrs['column-order'] = []
+                        values = pd.Categorical.from_codes(codes, categories=categories)
+                        with ad.settings.override(allow_write_nullable_strings=True):
+                            write_elem(handle, 'ids', values)
+                        frame = H5Frame(handle)
+                        expected = max(text_block_width(block) for _, block in iter_frame_index(frame))
+                        saved = np.concatenate([
+                            np.asarray(block, dtype=f'U{expected}') for _, block in iter_frame_index(frame)
+                        ])
+                        self.assertTrue(index_matches(frame, saved))
+                        saved[-1] = 'wrong'
+                        self.assertFalse(index_matches(frame, saved))
+                        with patch('causalmed_worker.backed.iter_frame_index',
+                                   side_effect=AssertionError('expanded categorical rows')):
+                            self.assertEqual(frame_id_stats(frame, measure_width=True),
+                                             (int(pd.Index(values).duplicated().sum()), expected))
+
+    def test_string_index_width_reuses_duplicate_scan(self):
+        from causalmed_worker.backed import H5Frame, frame_id_stats
+
+        values = ['細胞', 'x', '長い😀識別子', '細胞']
+        with tempfile.TemporaryDirectory() as directory:
+            with h5py.File(Path(directory) / 'indices.h5', 'w') as handle:
+                handle.attrs['_index'] = 'ids'
+                handle.attrs['column-order'] = []
+                handle.create_dataset('ids', data=values, dtype=h5py.string_dtype('utf-8'))
+                self.assertEqual(frame_id_stats(H5Frame(handle), measure_width=True), (1, 6))
 
     def test_streamed_numeric_indices_match_pandas_duplicate_counts(self):
         from causalmed_worker.backed import H5Frame, LegacyFrame, duplicate_frame_ids
