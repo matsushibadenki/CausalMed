@@ -2,7 +2,7 @@ export const resourceText = {
  "en": {
   "resource_setup_failed": "The operating system could not apply the worker resource limits.",
   "title": "Worker resources",
-  "help": "Applies to each supervised Python job. Linux caps the worker’s virtual address space. macOS caps virtual address growth after startup. Live resident-memory monitoring and a final peak check also apply. CPU time sums all worker threads. The thread setting requests BLAS/OpenMP parallelism. Budgets stay on this machine. The source and saved QC remain available after a failed run.",
+  "help": "Applies to each supervised Python job. Linux caps the worker’s virtual address space. macOS caps virtual address growth after startup. Windows uses process sampling for resident memory and CPU, including a final peak check before publishing results. CPU time sums all worker threads. The thread setting requests BLAS/OpenMP parallelism. Budgets stay on this machine. The source and saved QC remain available after a failed run.",
   "settings": "Budgets",
   "memory": "Memory budget",
   "cpu": "CPU budget",
@@ -35,7 +35,7 @@ export const resourceText = {
  "ja": {
   "resource_setup_failed": "OSがワーカーのリソース制限を適用できませんでした。",
   "title": "Workerリソース",
-  "help": "監視対象のPythonジョブごとに適用します。Linuxは仮想アドレス空間、macOSは起動後の仮想アドレス空間の増加分を制限します。実行中は常駐メモリを監視し、結果の確定前にピークも確認します。CPU時間は全スレッドの合計で、スレッド数はBLAS/OpenMPへの指定です。設定は端末に保存し、失敗時も原本と保存済みQCを保持します。",
+  "help": "監視対象のPythonジョブごとに適用します。Linuxは仮想アドレス空間、macOSは起動後の仮想アドレス空間の増加分を制限します。Windowsでは常駐メモリとCPU時間を監視し、結果の確定前にピークも確認します。CPU時間は全スレッドの合計で、スレッド数はBLAS/OpenMPへの指定です。設定は端末に保存し、失敗時も原本と保存済みQCを保持します。",
   "settings": "使用上限",
   "memory": "メモリ上限",
   "cpu": "CPU時間上限",
@@ -68,7 +68,7 @@ export const resourceText = {
  "zh": {
   "resource_setup_failed": "操作系统无法应用 worker 的资源限制。",
   "title": "Worker 资源",
-  "help": "每个受监督的 Python 任务单独应用。Linux 限制进程的虚拟地址空间，macOS 限制启动后的虚拟地址空间增长。运行时监测常驻内存，并在提交结果前检查峰值。CPU 时间为所有线程的总和，线程设置用于请求 BLAS/OpenMP 并行度。设置仅保存在本机。任务失败时保留原始文件和已保存的 QC。",
+  "help": "每个受监督的 Python 任务单独应用。Linux 限制进程的虚拟地址空间，macOS 限制启动后的虚拟地址空间增长。Windows 通过采样监测常驻内存和 CPU 时间，并在发布结果前检查峰值。CPU 时间为所有线程的总和，线程设置用于请求 BLAS/OpenMP 并行度。设置仅保存在本机。任务失败时保留原始文件和已保存的 QC。",
   "settings": "资源预算",
   "memory": "内存上限",
   "cpu": "CPU 时间预算",

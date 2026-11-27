@@ -109,6 +109,22 @@ python3.12 -m venv .venv
 .venv/bin/python -m pip install -r python/requirements.lock.txt
 ```
 
+### Windows development
+
+From PowerShell with Python 3.12 and the native Tauri prerequisites installed:
+
+```powershell
+npm ci
+py -3.12 -m venv .venv
+& ./.venv/Scripts/python.exe -m pip install -r python/requirements.lock.txt
+npm run tauri dev -- --config src-tauri/tauri.windows-dev.conf.json
+```
+
+The debug app can find `.venv/Scripts/python.exe` automatically. Use a clean
+Windows checkout for these steps. If you use an interpreter outside the
+checkout, set `CAUSALMED_PYTHON` to its absolute executable path. Windows
+installer builds still require a verified portable worker bundle.
+
 For a read-only browser preview:
 
 ```sh
@@ -208,6 +224,16 @@ The catalog discovers valid databases directly below the app data directory, inc
 
 ## Verification
 
+[GitHub Actions checks](.github/workflows/checks.yml) build and test the frontend,
+check and test Rust, and run the Python suite using the locked worker on Apple
+silicon macOS. They run on pull requests, pushes to `main`, and manual dispatch.
+A Windows Server 2025 check exercises native worker accounting, including an exited
+child, and runs the supervised CPU and memory budget test with development Python.
+To exercise real data on Windows, manually run **CausalMed checks** with
+`windows_real_h5ad` enabled. The job verifies the pinned SHA-256 of public
+Kang 2018 before and after QC, worker budget enforcement, restart and export.
+Release signing remains a separate check.
+
 ```sh
 npm run build
 npm test
@@ -244,3 +270,7 @@ Projects and QC histories can be moved to local Trash and restored with their or
 Project and QC lists support multiple selection across pages, searches and filters, with explicit counts outside the current page. Bulk trash/restore checks every target in Rust before changes, protects the active project, and reports per-item filesystem failures while retaining failed selections for retry. Project/trash-view changes clear temporary selection. See [bulk validation](docs/BULK_VALIDATION.md) for native public-data checks, interruption recovery and 1,000-item batches over 10,000 histories.
 
 Retained H5AD export now streams dense/CSR/CSC matrices, layers, raw data, embeddings and cell-pair matrices in bounded numeric blocks, including supported legacy layouts. QC vectors, annotations and HDF5/library overhead still require memory; this is not a hard process RSS limit. See [stream export validation](docs/STREAM_EXPORT_VALIDATION.md) for exact public-data round trips, encoding boundaries and the synthetic memory probe.
+
+## Research connections
+
+Use aggregate H5AD QC summaries with Gemini, OpenAI and local model servers from the research CLI. Codex and the standalone Google Antigravity App can read the same summaries through MCP. See the [research connections guide](docs/RESEARCH_CONNECTIONS.md).

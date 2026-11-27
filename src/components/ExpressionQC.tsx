@@ -36,6 +36,28 @@ export function ExpressionQC({report,locale,active,canAnalyze,timeout}:{report:H
   const geneColumns = options.matrix === 'raw' ? report.rawGeneColumns ?? [] : report.geneColumns ?? [];
   return <section className="expression-qc" aria-labelledby="qc-title">
     <header className="qc-heading"><div><SlidersHorizontal size={17}/><h3 id="qc-title">{t.title}</h3><Info text={t.help}/></div><small>{qc ? `${t.saved} · ${qc.options.matrix} · ${qc.features.toLocaleString()} ${t.features}` : t.noQc}</small></header>
+    {qc ? <>
+      {qc.status==='invalid_counts' ? <div className="qc-warning"><TriangleAlert size={16}/><div><strong>{t.invalid}</strong><p>{t.invalidHelp}</p><span>{t.nonfinite}: {qc.invalidValues.nonfinite} · {t.negative}: {qc.invalidValues.negative} · {t.fractional}: {qc.invalidValues.fractional}</span></div></div> : <>
+        {qc.status==='partial' ? <p className="qc-partial qc-priority-warning"><TriangleAlert size={13}/>{t.partial}</p> : null}
+        <div className="qc-summary"><div className="qc-retained"><strong>{qc.retained?.toLocaleString()}</strong><span>{t.retained}</span></div><div><strong>{qc.excluded?.toLocaleString()}</strong><span>{t.excluded}</span></div><div className="qc-retention-track" role="img" aria-label={`${t.retained}: ${qc.retained} / ${qc.cells}`}><span style={{width:`${(qc.retained??0)/qc.cells*100}%`}}/></div><b className="qc-rate">{((qc.retained??0)/qc.cells*100).toFixed(2)}%</b></div>
+      </>}
+      {donor?.column ? <section className="qc-donors"><header><h4><Users size={15}/>{donor.column}</h4><span>{donor.distinct} {t.donors} · {t.missing} {donor.missing}</span><Info text={t.donorHelp}/></header>
+        {donor.missingRetained ? <p className="qc-partial qc-priority-warning">{t.missing} · {t.after} {donor.missingRetained}</p> : null}
+        {donor.distinct<2 ? <p className="qc-partial qc-priority-warning">{t.singleDonor}</p> : null}
+        <div className="qc-donor-legend"><span className="donor-retained"/>{valid?t.after:t.before}<span className="donor-excluded"/>{t.excluded}</div>
+        {donor.groups.map((row,index)=>{const max=Math.max(...donor.groups.map(r=>r.cells),1);return <div className="qc-donor-row" key={index}><span>{row.label}</span><div className="qc-donor-bar" role="img" aria-label={`${row.label}: ${row.retained??'—'} / ${row.cells}`} style={{width:`${row.cells/max*100}%`}}><span style={{width:`${(row.retained??row.cells)/row.cells*100}%`}}/></div><span>{row.retained?.toLocaleString()??'—'} / {row.cells.toLocaleString()}</span></div>;})}
+        {donor.otherCells ? <small>{t.other}: {donor.otherCells.toLocaleString()}</small> : null}<small className="source-note">{t.unverified}</small>
+      </section> : null}
+      {valid ? <>
+        <div className="qc-chart-grid">{(['counts','genes','mito'] as const).map(key=>{
+          const histogram = qc.metrics[key];
+          return histogram ? <HistogramPlot key={key} histogram={histogram} title={t[key]} median={t.median} logLabel={t.log} cells={t.cells}/> : null;
+        })}</div>
+        {!qc.metrics.mito ? <p className="qc-unavailable-note"><TriangleAlert size={14}/><span>{t.mito} · {t.noMito}</span><code>{qc.options.mitoPrefix} · {qc.mitoFeatures}</code></p> : null}
+        {qc.zeroCells && qc.mitoFeatures ? <small className="source-note">{t.mitoUndefined}</small> : null}
+        <details className="qc-failures"><summary>{t.failures}</summary><div>{Object.entries(qc.failures).map(([key,value])=><span key={key}>{t[key as keyof typeof t] ?? key}<b>{value.toLocaleString()}</b></span>)}</div></details>
+      </> : null}
+    </> : null}
     <form onSubmit={event=>{event.preventDefault();setPending(true);setError('');void analyzeH5ad(options,report.sha256,timeout).catch(error=>setError(String(error))).finally(()=>setPending(false));}}>
       <div className="qc-mapping"><label><Users size={15}/>{t.donor}<select aria-label={t.donor} value={options.donorColumn} disabled={active || pending} onChange={e=>setOptions({...options,donorColumn:e.target.value})}><option value="">{t.unmapped}</option>{report.obsColumns.map(column=><option key={column}>{column}</option>)}</select></label><Info text={t.donorHelp}/><button type="submit" className="button" disabled={!canAnalyze || active || pending}><Play size={13}/>{t.run}</button></div>
       <details className="qc-options"><summary>{t.options}</summary><fieldset disabled={active || pending}><div className="qc-option-grid">
@@ -47,22 +69,6 @@ export function ExpressionQC({report,locale,active,canAnalyze,timeout}:{report:H
     </form>
     {!canAnalyze ? <p className="source-note">{t.sourceUnavailable}</p> : null}
     {error ? <p role="alert" className="form-error">{t[error as keyof typeof t] ?? t.invalid_qc_options}</p> : null}
-    {qc ? <>
-      {valid ? <QcExports key={report.selection?.id ?? 'none'} report={report} locale={locale} active={active} dirty={JSON.stringify(options)!==JSON.stringify(qc.options)} timeout={timeout}/> : null}
-      {qc.status==='invalid_counts' ? <div className="qc-warning"><TriangleAlert size={16}/><div><strong>{t.invalid}</strong><p>{t.invalidHelp}</p><span>{t.nonfinite}: {qc.invalidValues.nonfinite} · {t.negative}: {qc.invalidValues.negative} · {t.fractional}: {qc.invalidValues.fractional}</span></div></div> : <>
-        <div className="qc-summary"><div><strong>{qc.retained?.toLocaleString()}</strong><span>{t.retained}</span></div><div><strong>{qc.excluded?.toLocaleString()}</strong><span>{t.excluded}</span></div><div className="qc-retention-track" role="img" aria-label={`${t.retained}: ${qc.retained} / ${qc.cells}`}><span style={{width:`${(qc.retained??0)/qc.cells*100}%`}}/></div><b>{((qc.retained??0)/qc.cells*100).toFixed(2)}%</b></div>
-        {qc.status==='partial' ? <p className="qc-partial"><TriangleAlert size={13}/>{t.partial}</p> : null}
-        <div className="qc-chart-grid">{(['counts','genes','mito'] as const).map(key=>qc.metrics[key] ? <HistogramPlot key={key} histogram={qc.metrics[key]!} title={t[key]} median={t.median} logLabel={t.log} cells={t.cells}/> : <article key={key} className="qc-chart qc-unavailable"><h4>{t.mito}</h4><TriangleAlert size={20}/><span>{t.noMito}</span><code>{qc.options.mitoPrefix} · {qc.mitoFeatures}</code></article>)}</div>
-        {qc.zeroCells && qc.mitoFeatures ? <small className="source-note">{t.mitoUndefined}</small> : null}
-        <details className="qc-failures"><summary>{t.failures}</summary><div>{Object.entries(qc.failures).map(([key,value])=><span key={key}>{t[key as keyof typeof t] ?? key}<b>{value.toLocaleString()}</b></span>)}</div></details>
-      </>}
-      {donor?.column ? <section className="qc-donors"><header><h4><Users size={15}/>{donor.column}</h4><span>{donor.distinct} {t.donors} · {t.missing} {donor.missing}</span><Info text={t.donorHelp}/></header>
-        {donor.missingRetained ? <p className="qc-partial">{t.missing} · {t.after} {donor.missingRetained}</p> : null}
-        {donor.distinct<2 ? <p className="qc-partial">{t.singleDonor}</p> : null}
-        <div className="qc-donor-legend"><span className="donor-retained"/>{valid?t.after:t.before}<span className="donor-excluded"/>{t.excluded}</div>
-        {donor.groups.map((row,index)=>{const max=Math.max(...donor.groups.map(r=>r.cells),1);return <div className="qc-donor-row" key={index}><span>{row.label}</span><div className="qc-donor-bar" role="img" aria-label={`${row.label}: ${row.retained??'—'} / ${row.cells}`} style={{width:`${row.cells/max*100}%`}}><span style={{width:`${(row.retained??row.cells)/row.cells*100}%`}}/></div><span>{row.retained?.toLocaleString()??'—'} / {row.cells.toLocaleString()}</span></div>;})}
-        {donor.otherCells ? <small>{t.other}: {donor.otherCells.toLocaleString()}</small> : null}<small className="source-note">{t.unverified}</small>
-      </section> : null}
-    </> : null}
+    {valid && qc ? <QcExports key={report.selection?.id ?? 'none'} report={report} locale={locale} active={active} dirty={JSON.stringify(options)!==JSON.stringify(qc.options)} timeout={timeout}/> : null}
   </section>;
 }

@@ -9,16 +9,6 @@ pub fn definition<'a>(doc: &'a Document, id: &str) -> Result<&'a CohortDefinitio
         .find(|d| d.payload.id == id)
         .ok_or("definition_missing".into())
 }
-fn scope(worker: &Worker, key: &str) -> Result<(), String> {
-    let s = worker.snapshot();
-    if s.project_key != key {
-        return Err("project_changed".into());
-    }
-    if ["running", "selecting", "cancelling"].contains(&s.status.as_str()) {
-        return Err("worker_busy".into());
-    }
-    Ok(())
-}
 pub fn create(
     store: &mut ResearchStore,
     worker: &Worker,
@@ -56,7 +46,7 @@ pub fn create_values(
             return Err("cohort_values_incomplete".into());
         }
     }
-    scope(worker, key)?;
+    worker.require_idle(Some(key))?;
     let report = worker.snapshot().report.ok_or("dataset_missing")?;
     let sha = report["sha256"].as_str().ok_or("invalid_definition")?;
     let doc = store.snapshot();
@@ -134,7 +124,7 @@ pub fn record(
     key: &str,
     id: &str,
 ) -> Result<Document, String> {
-    scope(worker, key)?;
+    worker.require_idle(Some(key))?;
     let state = worker.snapshot();
     if state.status != "completed" {
         return Err("invalid_export".into());
@@ -168,7 +158,7 @@ pub fn adopt(
     id: &str,
     revision: u64,
 ) -> Result<Document, String> {
-    scope(worker, key)?;
+    worker.require_idle(Some(key))?;
     let r = worker.snapshot().report.ok_or("dataset_missing")?;
     let doc = store.snapshot();
     let def = definition(&doc, id)?;

@@ -1,0 +1,98 @@
+name: CausalMed checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      windows_real_h5ad:
+        description: Run the public Kang 2018 H5AD checks on Windows
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    name: Frontend, Rust and bundled worker
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Install frontend dependencies
+        run: npm ci
+      - name: Build and test frontend
+        run: |
+          npm run build
+          npm test
+      - name: Test Rust core
+        run: cargo test --locked -p causalmed-core
+      - name: Prepare the locked Python worker
+        run: npm run bundle:worker
+      - name: Check and test Tauri
+        run: |
+          cargo check --locked -p causalmed
+          cargo test --locked -p causalmed --lib
+      - name: Test Python with the bundled interpreter
+        env:
+          PYTHONPATH: python
+        run: src-tauri/python-worker/python/bin/python3.12 -B -m unittest discover -s python/tests
+
+  windows-resources:
+    name: Windows worker process accounting
+    runs-on: windows-2025
+    timeout-minutes: 30
+    env:
+      # Build the test binary without a platform-specific worker distribution.
+      TAURI_CONFIG: '{"bundle":{"active":false,"resources":[]}}'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Test Win32 process accounting
+        run: "cargo test --locked -p causalmed --lib resources::"
+      - name: Test supervised budget failures and retry
+        run: |
+          $env:CAUSALMED_PYTHON = (Get-Command python.exe -ErrorAction Stop).Source
+          cargo test --locked -p causalmed --lib h5ad::tests::resource_budgets_reap_child_preserve_report_and_prevent_publication
+      - name: Verify real H5AD QC, budget enforcement and historical export
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.windows_real_h5ad }}
+        run: |
+          python -m venv .venv
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./.venv/Scripts/python.exe -m pip install -r python/requirements.lock.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $fixture = Join-Path $env:RUNNER_TEMP 'kang2018.h5ad'
+          $expectedHash = 'e6a5adac64dcdeb36eaba27db49b63e0c64bb0ed4a64c6705971506b41c39830'
+          Invoke-WebRequest -Uri 'https://exampledata.scverse.org/pertpy/kang_2018.h5ad' -OutFile $fixture -TimeoutSec 180
+          if ((Get-FileHash -Algorithm SHA256 -LiteralPath $fixture).Hash -ne $expectedHash) {
+            throw 'The public Kang 2018 fixture did not match its pinned SHA-256.'
+          }
+          $env:CAUSALMED_TEST_DONOR_H5AD = $fixture
+
+          cargo test --locked -p causalmed --lib h5ad::tests::public_h5ad_resource_stop_retry_restore_and_isolation -- --ignored
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p causalmed --lib h5ad::tests::public_selection_archives_and_exports_survive_restart -- --ignored
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ((Get-FileHash -Algorithm SHA256 -LiteralPath $fixture).Hash -ne $expectedHash) {
+            throw 'The H5AD checks changed the source file.'
+          }

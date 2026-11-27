@@ -140,6 +140,14 @@ pub(crate) fn resolve(
     }
     unavailable("bundled_runtime_missing")
 }
+fn development_venv(root: &Path) -> PathBuf {
+    root.join(if cfg!(windows) {
+        "../.venv/Scripts/python.exe"
+    } else {
+        "../.venv/bin/python"
+    })
+}
+
 pub fn current() -> Runtime {
     static SELECTED: std::sync::OnceLock<Runtime> = std::sync::OnceLock::new();
     SELECTED
@@ -150,7 +158,7 @@ pub fn current() -> Runtime {
                 cfg!(debug_assertions),
                 std::env::var_os("CAUSALMED_PYTHON").map(PathBuf::from),
                 &root.join("python-worker"),
-                &root.join("../.venv/bin/python"),
+                &development_venv(root),
             )
         })
         .clone()

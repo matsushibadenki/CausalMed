@@ -6,8 +6,11 @@ vectors, annotations, HDF5 compression caches and library imports remain separat
 if 'index_matches' not in globals():
     from causalmed_worker.backed import (index_matches, read_research_frame, scratch_vector, LegacyFrame, H5Frame,
                                          configure_legacy_categories, string_block_rows, is_budgeted_vlen,
-                                         read_bounded_vlen, projected_category_dictionary, CategoryDictionary, split_vlen_batch, VLEN_BLOCK_ROWS, vlen_byte_limit, copy_native_vlen_attribute,
-                                         copy_native_compound_tile, with_small_metadata_caches)
+                                         read_bounded_vlen, projected_category_dictionary, CategoryDictionary, split_vlen_batch, VLEN_BLOCK_ROWS)
+    from causalmed_worker.vlen_io import (
+        copy_native_compound_tile, copy_native_vlen_attribute, vlen_byte_limit,
+        with_small_metadata_caches,
+    )
 
 
 import math

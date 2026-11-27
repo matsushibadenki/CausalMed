@@ -55,16 +55,20 @@ export function H5adImport({ locale, sourceSha256='' }: { locale: Locale;sourceS
       {report && ['cancelled', 'timed_out', 'failed'].includes(job.status) ? <small>{exporting?xt.noOutput:text.retained}</small> : null}
     </div> : null}
     <SourceRelink key={report?.selection?.id} locale={locale} timeout={timeout}/>
-    <QcHistory locale={locale} job={job} active={active} sourceSha256={sourceSha256}/>
     {report ? <div className="h5ad-report">
       <div className="h5ad-file-heading"><h3>{report.name}</h3><span className="neutral-label">{text.unknown}</span></div>
-      <dl className="h5ad-metrics"><div><dt>{text.cells}</dt><dd>{report.cells.toLocaleString()}</dd></div><div><dt>{text.genes}</dt><dd>{report.genes.toLocaleString()}</dd></div><div><dt>{text.size}</dt><dd>{report.bytes ? `${(report.bytes / 1024 / 1024).toFixed(1)} MB` : '—'}</dd></div><div className={report.duplicateCellIds + report.duplicateGeneIds > 0 ? 'metric-warning' : ''}><dt>{text.duplicates}</dt><dd>{(report.duplicateCellIds + report.duplicateGeneIds).toLocaleString()}</dd></div></dl>
+      <dl className="h5ad-metrics"><div><dt>{text.cells}</dt><dd>{report.cells.toLocaleString()}</dd></div><div><dt>{text.genes}</dt><dd>{report.genes.toLocaleString()}</dd></div><div className="h5ad-file-size"><dt>{text.size}</dt><dd>{report.bytes ? `${(report.bytes / 1024 / 1024).toFixed(1)} MB` : '—'}</dd></div><div className={report.duplicateCellIds + report.duplicateGeneIds > 0 ? 'metric-warning' : ''}><dt>{text.duplicates}</dt><dd>{(report.duplicateCellIds + report.duplicateGeneIds).toLocaleString()}</dd></div></dl>
+      <ExpressionQC key={report.selection?.id ?? report.sha256 + JSON.stringify(report.qc?.options)} report={report} locale={locale} active={active} canAnalyze={job.canAnalyze} timeout={timeout}/>
       {group ? <section className="h5ad-distribution"><div className="h5ad-distribution-heading"><label>{text.grouping} <select value={groupKey} onChange={e => setSelectedGroup(e.target.value)}>{keys.map(key => <option key={key}>{key}</option>)}</select></label><span>{group.distinct} · {text.missing} {group.missing}</span></div>
         <div className="h5ad-stacked" aria-hidden="true">{group.counts.map((row, index) => <span key={index} style={{ width: `${row.count / report.cells * 100}%`, background: colors[index % colors.length] }}/>) }{group.missing + (group.other ?? 0) > 0 ? <span style={{flex: 1, background: '#b8b7b1'}}/> : null}</div>
         <div className="h5ad-category-grid">{[...group.counts, ...(group.other ? [{label: text.other, count: group.other}] : []), ...(group.missing ? [{label: text.missing, count: group.missing}] : [])].map((row, index) => <div className="h5ad-category" key={index}><span className="h5ad-category-dot" style={{background: colors[index % colors.length]}}/><span>{row.label}</span><b>{row.count.toLocaleString()}</b><span className="h5ad-percentage">{(row.count / report.cells * 100).toFixed(1)}%</span></div>)}</div>
       </section> : <p className="source-note">{text.noGroups}</p>}
-      <ExpressionQC key={report.selection?.id ?? report.sha256 + JSON.stringify(report.qc?.options)} report={report} locale={locale} active={active} canAnalyze={job.canAnalyze} timeout={timeout}/>
+
       <div className="h5ad-footer"><span>{text.metadata}</span>{!report.qc?.donor.column && !report.obsColumns.some(c => ['donor', 'donor_id'].includes(c)) ? <span><TriangleAlert size={13}/>{text.donorAbsent}</span> : null}<details><summary>{text.obs} · SHA-256</summary><p>{text.columns}: {report.obsColumns.join(', ') || '—'}</p><code>{report.sha256}</code><p>{text.version}: anndata {report.anndataVersion ?? '—'}</p></details></div>
     </div> : <div className="h5ad-empty"><FileUp size={25} strokeWidth={1.3}/><span>{text.empty}</span></div>}
+    {report ? <details className="qc-history-disclosure">
+      <summary>{ht.title}</summary>
+      <QcHistory locale={locale} job={job} active={active} sourceSha256={sourceSha256}/>
+    </details> : <QcHistory locale={locale} job={job} active={active} sourceSha256={sourceSha256}/>}
   </section>;
 }

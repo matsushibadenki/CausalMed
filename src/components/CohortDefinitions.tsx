@@ -1,5 +1,5 @@
+import { errorMessage } from '../lib/i18n';
 import { CohortValuePicker } from './CohortValuePicker';
-import { resourceText } from '../lib/resourceI18n';
 import { useState } from 'react';
 import { invoke,isTauri } from '@tauri-apps/api/core';
 import { FileOutput, Layers, Plus, Square, Pencil, Check } from 'lucide-react';
@@ -7,12 +7,10 @@ import { refresh } from '../lib/bridge';
 import { cancelH5ad,refreshH5ad,useH5ad,workerActive } from '../lib/h5ad';
 import type { ResearchDocument } from '../lib/types';
 import { definitionText } from '../lib/definitionI18n';
-import { cohortText } from '../lib/cohortI18n';
 import { datasetText } from '../lib/datasetI18n';
-import { exportText } from '../lib/exportI18n';
 import { Info,IconButton } from './ui';
 export function CohortDefinitions({document}:{document:ResearchDocument}){
- const locale=document.workspace.locale,t=definitionText[locale],ct=cohortText[locale],dt=datasetText[locale],et=exportText[locale],job=useH5ad();
+ const locale=document.workspace.locale,t=definitionText[locale],dt=datasetText[locale],job=useH5ad();
  const [renaming,setRenaming]=useState<{id:string;name:string;revision:number}|null>(null);
  const [busy,setBusy]=useState(false),[error,setError]=useState(''),[notice,setNotice]=useState(false),[timeout,setTimeoutSeconds]=useState(120),[page,setPage]=useState(1);
  const source=document.datasets.find(d=>d.observation.sha256===job.report?.sha256),alignment=document.cohorts.find(c=>c.observation.sourceSha256===source?.observation.sha256&&c.observation.qcId===job.report?.selection?.id);
@@ -22,15 +20,14 @@ export function CohortDefinitions({document}:{document:ResearchDocument}){
  const candidates=document.cohortDefinitions.filter(d=>d.exports.some(r=>r.sha256===job.report?.sha256)&&job.report?.cohortOrigins?.some(o=>o.definitionId===d.payload.id&&o.definitionSha256===d.sha256));
  const adoptable=candidates.filter(()=>!source);
  const pages=Math.max(1,Math.ceil(document.cohortDefinitions.length/6)),currentPage=Math.min(page,pages);
- function message(code:string){return resourceText[locale][code as keyof typeof resourceText.en]??t[code as keyof typeof t]??ct[code as keyof typeof ct]??dt[code as keyof typeof dt]??et[code as keyof typeof et]??t.error;}
  async function action(command:string,args:Record<string,unknown>){setBusy(true);setError('');setNotice(false);try{await invoke(command,{projectKey:job.projectKey,expectedRevision:document.revision,...args});await Promise.all([refresh(),refreshH5ad(true)]);if(command==='create_cohort_selection'){setPage(1);}if(command==='adopt_cohort_export')setNotice(true);if(command==='rename_cohort_definition')setRenaming(null);}catch(e){setError(String(e));}finally{setBusy(false);}}
  return <section className="dataset-registry cohort-definitions"><header><Layers size={18}/><h2>{t.title}</h2><span>{document.cohortDefinitions.length}</span><Info text={t.help}/><select aria-label={t.timeout} value={timeout} disabled={disabled} onChange={e=>setTimeoutSeconds(Number(e.target.value))}>{[1,30,120,600,3600].map(v=><option key={v} value={v}>{v} s</option>)}</select></header>
- {error?<p role="alert">{message(error)}</p>:null}{notice?<p role="status">{t.recheck}</p>:null}
+ {error?<p role="alert">{errorMessage(error, locale, 'definition')}</p>:null}{notice?<p role="status">{t.recheck}</p>:null}
  {source&&alignment?<DefinitionForm key={`${job.projectKey}:${source.observation.sha256}:${alignment.observation.qcId}:${source.metadata.conditionColumn}:${source.metadata.perturbationColumn}`} locale={locale} disabled={disabled} conditionColumn={source.metadata.conditionColumn} perturbationColumn={source.metadata.perturbationColumn} conditions={cg?.complete?cg.counts:[]} perturbations={pg?.complete?pg.counts:[]} onDefine={args=>action('create_cohort_selection',args)}/>:<small>{t.empty}</small>}
 
  {adoptable.map(d=><div className="definition-adopt" key={d.payload.id}><strong>{d.payload.name}</strong><span>{d.payload.metadata.donorColumn}</span><button className="button primary" disabled={disabled} onClick={()=>void action('adopt_cohort_export',{id:d.payload.id})}>{t.adopt}</button><Info text={t.after}/></div>)}
  {job.operation==='export_cohort'&&active?<div className="definition-progress" role="status"><span>{t.working} {job.percent}%</span><progress value={job.percent} max={100}/><IconButton label={t.cancel} disabled={job.status==='selecting'||job.status==='cancelling'} onClick={()=>void cancelH5ad()}><Square size={13}/></IconButton></div>:null}
- {job.operation==='export_cohort'&&job.error?<p role="alert">{message(job.error)}</p>:null}
+ {job.operation==='export_cohort'&&job.error?<p role="alert">{errorMessage(job.error, locale, 'definition')}</p>:null}
  <div className="definition-list">{[...document.cohortDefinitions].reverse().slice((currentPage-1)*6,currentPage*6).map(d=><article key={d.payload.id}><div className="registry-title">{renaming?.id===d.payload.id?<><input aria-label={t.name} maxLength={200} value={renaming.name} onChange={e=>setRenaming({...renaming,name:e.target.value})}/><IconButton label={t.save} disabled={disabled} onClick={()=>void action('rename_cohort_definition',{id:d.payload.id,name:renaming.name,expectedRevision:renaming.revision})}><Check size={14}/></IconButton></>:<><strong>{d.payload.name}</strong>{!d.exports.length?<IconButton label={`${t.rename}: ${d.payload.name}`} disabled={disabled} onClick={()=>setRenaming({id:d.payload.id,name:d.payload.name,revision:document.revision})}><Pencil size={14}/></IconButton>:null}</>}<button className="button" disabled={disabled} onClick={()=>void action('export_cohort_definition',{id:d.payload.id,timeoutSeconds:timeout})}><FileOutput size={14}/>{t.export}</button></div><div className="definition-filters"><span>{d.payload.metadata.conditionColumn} ∈ <b>({(d.payload.conditionValues?.length?d.payload.conditionValues:[d.payload.conditionValue]).join(' ∨ ')})</b></span><span>∧</span><span>{d.payload.metadata.perturbationColumn} ∈ <b>({(d.payload.perturbationValues?.length?d.payload.perturbationValues:[d.payload.perturbationValue]).join(' ∨ ')})</b></span></div><small>{t.qc} <code>{d.payload.alignment.observation.qcId.slice(0,8)}</code> · {t.frozen} · {t.reviewed} {d.payload.alignment.settings.mappings.filter(m=>m.reviewed).length}/{d.payload.alignment.settings.mappings.length}<Info text={t.draft}/></small><details><summary>{t.origin} · {d.payload.sourceSha256.slice(0,12)}</summary><code>{d.payload.sourceSha256}</code><br/><code>{d.sha256}</code></details>{d.exports.length?<details open><summary>{t.receipt} · {d.exports.length}</summary>{d.exports.map((r,i)=><div className="definition-receipt" key={i}><strong>{r.fileName}</strong><span>{t.retained} {r.retained.toLocaleString()} / {t.matched} {r.matched.toLocaleString()}</span><div className="cohort-coverage"><span style={{width:`${100*r.retained/r.matched}%`}}/></div><code title={r.sha256}>{r.sha256}</code></div>)}</details>:null}</article>)}</div>
  {document.cohortDefinitions.length>6?<div className="registry-pager"><button className="button" aria-label={dt.previous} disabled={currentPage===1} onClick={()=>setPage(currentPage-1)}>‹</button><span>{currentPage}/{pages}</span><button className="button" aria-label={dt.next} disabled={currentPage===pages} onClick={()=>setPage(currentPage+1)}>›</button></div>:null}
  </section>;

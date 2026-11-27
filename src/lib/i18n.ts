@@ -1,3 +1,9 @@
+import { resourceText } from './resourceI18n';
+import { exportText } from './exportI18n';
+import { evaluationText } from './evaluationI18n';
+import { definitionText } from './definitionI18n';
+import { datasetText } from './datasetI18n';
+import { cohortText } from './cohortI18n';
 import { projectText } from './projectI18n';
 import type { Locale } from './types';
 
@@ -87,10 +93,25 @@ const zh: Messages = {
 const messages: Record<Locale,Messages> = { en, ja, zh };
 export type TranslationKey = keyof Messages;
 export function translator(locale: Locale) { return (key: string): string => messages[locale][key as TranslationKey] ?? key; }
-export function errorMessage(error: unknown, locale: Locale): string {
-  const raw = String(error); const code = raw.replace(/^Error: /, '').split(':')[0];
-  if(code in projectText.en) return projectText[locale][code as keyof typeof projectText.en];
-  return code in en ? translator(locale)(code) : translator(locale)('operationFailed');
+type ErrorDictionary = Record<Locale, Readonly<Record<string, string>>>;
+const errorScopes = {
+  evaluation: { dictionaries: [resourceText, evaluationText, cohortText, datasetText, exportText], fallback: evaluationText },
+  definition: { dictionaries: [resourceText, definitionText, cohortText, datasetText, exportText], fallback: definitionText },
+  cohort: { dictionaries: [cohortText, datasetText], fallback: cohortText },
+  worker: { dictionaries: [resourceText, datasetText], fallback: resourceText },
+} satisfies Record<string, { dictionaries: ErrorDictionary[]; fallback: ErrorDictionary }>;
+
+export function errorMessage(error: unknown, locale: Locale, scope?: keyof typeof errorScopes): string {
+  const code = String(error).replace(/^Error: /, '').split(':', 1)[0].trim();
+  const context = scope ? errorScopes[scope] : undefined;
+  for (const dictionary of context?.dictionaries ?? []) {
+    const entries: Readonly<Record<string, string>> = dictionary[locale];
+    if (Object.hasOwn(entries, code)) return entries[code];
+  }
+  const project: Readonly<Record<string, string>> = projectText[locale];
+  if (Object.hasOwn(project, code)) return project[code];
+  if (Object.hasOwn(en, code)) return translator(locale)(code);
+  return context?.fallback[locale].error ?? messages[locale].operationFailed;
 }
 export function formatDate(value: string, locale: Locale) { return new Intl.DateTimeFormat({en:'en-US',ja:'ja-JP',zh:'zh-CN'}[locale], { dateStyle:'short', timeStyle:'short' }).format(new Date(value)); }
 export const localeLabels: Record<Locale,string> = { en:'English',ja:'日本語',zh:'简体中文' };

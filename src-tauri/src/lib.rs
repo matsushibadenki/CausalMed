@@ -24,16 +24,15 @@ struct AppState {
     renderer: Mutex<Option<Renderer>>,
 }
 impl AppState {
-    fn worker(&self) -> Arc<h5ad::Worker> {
-        self.h5ad.read().unwrap().clone()
+    fn worker(&self) -> Result<Arc<h5ad::Worker>, String> {
+        self.h5ad
+            .read()
+            .map(|worker| Arc::clone(&worker))
+            .map_err(|_| "state_unavailable".into())
     }
     fn switch_to(&self, id: &str) -> Result<u64, String> {
         let _gate = self.project_gate.try_write().map_err(|_| "project_busy")?;
-        if ["selecting", "running", "cancelling"]
-            .contains(&self.worker().snapshot().status.as_str())
-        {
-            return Err("worker_busy".into());
-        }
+        self.worker()?.require_idle(None)?;
         let folder = project::resolve(&self.root, id)?;
         let mut current = self.store.lock().map_err(|_| "state_unavailable")?;
         let (next, next_worker) =
@@ -46,7 +45,20 @@ impl AppState {
         Ok(revision)
     }
 }
+fn notify_h5ad(app: &tauri::AppHandle) {
+    let _ = app.emit("h5ad-state-changed", ());
+}
+
+fn spawn_h5ad_task(app: tauri::AppHandle, task: impl FnOnce(&tauri::AppHandle) + Send + 'static) {
+    notify_h5ad(&app);
+    tauri::async_runtime::spawn_blocking(move || {
+        task(&app);
+        notify_h5ad(&app);
+    });
+}
+
 fn publish_project(app: &tauri::AppHandle, revision: u64) {
+    notify_h5ad(app);
     let _ = app.emit("document-changed", revision);
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
@@ -55,7 +67,10 @@ fn publish_project(app: &tauri::AppHandle, revision: u64) {
                 let _ = window.close();
             }
         }
-        *handle.state::<AppState>().renderer.lock().unwrap() = None;
+        let state = handle.state::<AppState>();
+        if let Ok(mut renderer) = state.renderer.lock() {
+            *renderer = None;
+        };
     });
 }
 #[tauri::command]
@@ -66,7 +81,7 @@ async fn query_projects(
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let _gate = state.project_gate.try_read().map_err(|_| "project_busy")?;
-        browse::projects(&state.root, &state.worker().snapshot().project_key, &query)
+        browse::projects(&state.root, &state.worker()?.project_key()?, &query)
     })
     .await
     .map_err(|_| "storage_error")?
@@ -80,7 +95,7 @@ async fn query_qc_history(
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let _gate = state.project_gate.try_read().map_err(|_| "project_busy")?;
-        browse::history(&state.worker(), &project_key, &query)
+        browse::history(state.worker()?.as_ref(), &project_key, &query)
     })
     .await
     .map_err(|_| "storage_error")?
@@ -96,20 +111,17 @@ async fn set_trash(
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let _gate = state.project_gate.try_write().map_err(|_| "project_busy")?;
-        let worker = state.worker();
-        let snapshot = worker.snapshot();
-        if snapshot.project_key != project_key {
-            return Err("project_changed".into());
-        }
-        if ["selecting", "running", "cancelling"].contains(&snapshot.status.as_str()) {
-            return Err("worker_busy".into());
-        }
+        let worker = state.worker()?;
+        worker.require_idle(Some(&project_key))?;
         let result = match kind.as_str() {
             "history" => trash::history(&worker, &project_key, &id, restore),
             "project" => trash::project(&state.root, &id, restore),
             _ => Err("trash_unavailable".into()),
         };
         let _ = app.emit("history-changed", &project_key);
+        if kind == "history" {
+            notify_h5ad(&app);
+        }
         result
     })
     .await
@@ -128,13 +140,16 @@ async fn set_trash_batch(
         let _gate = state.project_gate.try_write().map_err(|_| "project_busy")?;
         let result = trash::batch(
             &state.root,
-            &state.worker(),
+            state.worker()?.as_ref(),
             &project_key,
             &kind,
             &ids,
             restore,
         );
         let _ = app.emit("history-changed", &project_key);
+        if kind == "history" {
+            notify_h5ad(&app);
+        }
         result
     })
     .await
@@ -150,7 +165,7 @@ fn register_dataset(
     let _gate = state.project_gate.try_read().map_err(|_| "project_busy")?;
     let doc = datasets::register(
         &mut *state.store.lock().map_err(|_| "state_unavailable")?,
-        &state.worker(),
+        state.worker()?.as_ref(),
         &project_key,
         &sha256,
     )?;
@@ -167,9 +182,7 @@ fn update_dataset(
     expected_revision: u64,
 ) -> Reply {
     let _gate = state.project_gate.try_read().map_err(|_| "project_busy")?;
-    if state.worker().snapshot().project_key != project_key {
-        return Err("project_changed".into());
-    }
+    state.worker()?.require_project(&project_key)?;
     let doc = state
         .store
         .lock()
@@ -190,9 +203,7 @@ fn set_evaluation_plan(
     expected_revision: u64,
 ) -> Reply {
     let _gate = state.project_gate.try_write().map_err(|_| "project_busy")?;
-    if state.worker().snapshot().project_key != project_key {
-        return Err("project_changed".into());
-    }
+    state.worker()?.require_project(&project_key)?;
     let doc = state
         .store
         .lock()
@@ -205,9 +216,7 @@ fn set_evaluation_plan(
 #[tauri::command]
 fn evaluation_context_sha(state: State<AppState>, project_key: String) -> Result<String, String> {
     let _gate = state.project_gate.try_read().map_err(|_| "project_busy")?;
-    if state.worker().snapshot().project_key != project_key {
-        return Err("project_changed".into());
-    }
+    state.worker()?.require_project(&project_key)?;
     let doc = state
         .store
         .lock()
@@ -226,10 +235,8 @@ async fn inspect_real_outcome(
 ) -> Result<(), String> {
     let state = app.state::<AppState>();
     let _gate = state.project_gate.try_read().map_err(|_| "project_busy")?;
-    let worker = state.worker();
-    if worker.snapshot().project_key != project_key {
-        return Err("project_changed".into());
-    }
+    let worker = state.worker()?;
+    worker.require_project(&project_key)?;
     let doc = state
         .store
         .lock()
@@ -241,15 +248,21 @@ async fn inspect_real_outcome(
     let (ctx, jobs) = evaluation::jobs(&doc, &worker)?;
     worker.reserve_outcome(timeout_seconds)?;
     drop(_gate);
-    let app = app.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    spawn_h5ad_task(app.clone(), move |app| {
         let state = app.state::<AppState>();
         let Ok(_gate) = state.project_gate.write() else {
             worker.finish("failed", Some("project_busy"));
             return;
         };
-        if state.worker().snapshot().project_key != project_key {
-            worker.finish("failed", Some("project_changed"));
+        let current = match state.worker() {
+            Ok(current) => current,
+            Err(code) => {
+                worker.finish("failed", Some(&code));
+                return;
+            }
+        };
+        if let Err(code) = current.require_project(&project_key) {
+            worker.finish("failed", Some(&code));
             return;
         }
         worker.run_outcome(ctx.clone(), jobs);
@@ -289,10 +302,8 @@ async fn run_real_baseline(
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let _gate = state.project_gate.try_write().map_err(|_| "project_busy")?;
-        let worker = state.worker();
-        if worker.snapshot().project_key != project_key {
-            return Err("project_changed".into());
-        }
+        let worker = state.worker()?;
+        worker.require_project(&project_key)?;
         let doc = state
             .store
             .lock()
@@ -327,7 +338,7 @@ fn create_cohort_definition(
     let _gate = state.project_gate.try_read().map_err(|_| "project_busy")?;
     let doc = definitions::create(
         &mut *state.store.lock().map_err(|_| "state_unavailable")?,
-        &state.worker(),
+        state.worker()?.as_ref(),
         &project_key,
         name,
         condition_value,
@@ -350,7 +361,7 @@ fn create_cohort_selection(
     let _gate = state.project_gate.try_read().map_err(|_| "project_busy")?;
     let doc = definitions::create_values(
         &mut *state.store.lock().map_err(|_| "state_unavailable")?,
-        &state.worker(),
+        state.worker()?.as_ref(),
         &project_key,
         name,
         condition_values,
@@ -370,12 +381,7 @@ fn rename_cohort_definition(
     expected_revision: u64,
 ) -> Reply {
     let _gate = state.project_gate.try_read().map_err(|_| "project_busy")?;
-    if state.worker().snapshot().project_key != project_key {
-        return Err("project_changed".into());
-    }
-    if ["selecting", "running", "cancelling"].contains(&state.worker().snapshot().status.as_str()) {
-        return Err("worker_busy".into());
-    }
+    state.worker()?.require_idle(Some(&project_key))?;
     let doc = state
         .store
         .lock()
@@ -396,7 +402,7 @@ fn adopt_cohort_export(
     let _gate = state.project_gate.try_read().map_err(|_| "project_busy")?;
     let doc = definitions::adopt(
         &mut *state.store.lock().map_err(|_| "state_unavailable")?,
-        &state.worker(),
+        state.worker()?.as_ref(),
         &project_key,
         &id,
         expected_revision,
@@ -413,10 +419,8 @@ async fn export_cohort_definition(
 ) -> Result<(), String> {
     let state = app.state::<AppState>();
     let _gate = state.project_gate.try_read().map_err(|_| "project_busy")?;
-    let worker = state.worker();
-    if worker.snapshot().project_key != project_key {
-        return Err("project_changed".into());
-    }
+    let worker = state.worker()?;
+    worker.require_project(&project_key)?;
     let doc = state
         .store
         .lock()
@@ -425,8 +429,7 @@ async fn export_cohort_definition(
     let def = definitions::definition(&doc, &id)?.clone();
     let source = worker.export_source(&def.payload.alignment.observation.qc_id)?;
     worker.reserve(timeout_seconds)?;
-    let app = app.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    spawn_h5ad_task(app.clone(), move |app| {
         let Some(file) = app
             .dialog()
             .file()
@@ -446,8 +449,15 @@ async fn export_cohort_definition(
             worker.finish("failed", Some("project_busy"));
             return;
         };
-        if state.worker().snapshot().project_key != project_key {
-            worker.finish("failed", Some("project_changed"));
+        let current = match state.worker() {
+            Ok(current) => current,
+            Err(code) => {
+                worker.finish("failed", Some(&code));
+                return;
+            }
+        };
+        if let Err(code) = current.require_project(&project_key) {
+            worker.finish("failed", Some(&code));
             return;
         }
         worker.run_cohort_export(
@@ -461,9 +471,7 @@ async fn export_cohort_definition(
             let state = app.state::<AppState>();
             let result = (|| {
                 let mut store = state.store.lock().map_err(|_| "state_unavailable")?;
-                if state.worker().snapshot().project_key != project_key {
-                    return Err("project_changed".to_owned());
-                }
+                state.worker()?.require_project(&project_key)?;
                 definitions::record(&mut store, &worker, &project_key, &id)
             })();
             match result {
@@ -487,7 +495,7 @@ fn capture_cohort(
     let _gate = state.project_gate.try_read().map_err(|_| "project_busy")?;
     let doc = cohorts::capture(
         &mut *state.store.lock().map_err(|_| "state_unavailable")?,
-        &state.worker(),
+        state.worker()?.as_ref(),
         &project_key,
         &sha256,
         expected_revision,
@@ -505,9 +513,7 @@ fn update_cohort(
     expected_revision: u64,
 ) -> Reply {
     let _gate = state.project_gate.try_read().map_err(|_| "project_busy")?;
-    if state.worker().snapshot().project_key != project_key {
-        return Err("project_changed".into());
-    }
+    state.worker()?.require_project(&project_key)?;
     let doc = state
         .store
         .lock()
@@ -534,7 +540,7 @@ async fn assess_eligibility(
         if doc.revision != expected_revision {
             return Err("dataset_changed".into());
         }
-        let result = cohorts::assess(&doc, &state.worker(), &project_key)?;
+        let result = cohorts::assess(&doc, state.worker()?.as_ref(), &project_key)?;
         if state
             .store
             .lock()
@@ -558,10 +564,8 @@ async fn dataset_counts(
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let _gate = state.project_gate.try_read().map_err(|_| "project_busy")?;
-        let worker = state.worker();
-        if worker.snapshot().project_key != project_key {
-            return Err("project_changed".into());
-        }
+        let worker = state.worker()?;
+        worker.require_project(&project_key)?;
         let hashes = state
             .store
             .lock()
@@ -601,11 +605,7 @@ async fn create_project(app: tauri::AppHandle, name: String) -> Result<(), Strin
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let gate = state.project_gate.try_write().map_err(|_| "project_busy")?;
-        if ["selecting", "running", "cancelling"]
-            .contains(&state.worker().snapshot().status.as_str())
-        {
-            return Err("worker_busy".into());
-        }
+        state.worker()?.require_idle(None)?;
         let mut current = state.store.lock().map_err(|_| "state_unavailable")?;
         let folder = project::create(&state.root, &name, current.snapshot().revision)?;
         let next = ResearchStore::open(folder.path().join("research.sqlite3"))
@@ -720,10 +720,8 @@ async fn save_project(app: tauri::AppHandle) -> Result<bool, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let _gate = state.project_gate.try_write().map_err(|_| "project_busy")?;
-        let worker = state.worker();
-        if ["selecting", "running", "cancelling"].contains(&worker.snapshot().status.as_str()) {
-            return Err("worker_busy".into());
-        }
+        let worker = state.worker()?;
+        worker.require_idle(None)?;
         let Some(file) = app
             .dialog()
             .file()
@@ -751,11 +749,7 @@ async fn restore_project(app: tauri::AppHandle) -> Result<bool, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let _gate = state.project_gate.try_write().map_err(|_| "project_busy")?;
-        if ["selecting", "running", "cancelling"]
-            .contains(&state.worker().snapshot().status.as_str())
-        {
-            return Err("worker_busy".into());
-        }
+        state.worker()?.require_idle(None)?;
         let Some(file) = app
             .dialog()
             .file()
@@ -801,11 +795,10 @@ async fn relink_h5ad(
 ) -> Result<(), String> {
     let state = app.state::<AppState>();
     let _gate = state.project_gate.try_read().map_err(|_| "project_busy")?;
-    let worker = state.worker();
+    let worker = state.worker()?;
     let sha = worker.relink_sha(&selection_id)?;
     worker.reserve(timeout_seconds)?;
-    let app = app.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    spawn_h5ad_task(app.clone(), move |app| {
         let Some(file) = app
             .dialog()
             .file()
@@ -981,24 +974,21 @@ async fn open_graph(app: tauri::AppHandle) -> Result<(), String> {
 async fn import_h5ad(app: tauri::AppHandle, timeout_seconds: u64) -> Result<(), String> {
     let state = app.state::<AppState>();
     let _gate = state.project_gate.try_read().map_err(|_| "project_busy")?;
-    state.worker().reserve(timeout_seconds)?;
-    let app = app.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<AppState>();
+    let worker = state.worker()?;
+    worker.reserve(timeout_seconds)?;
+    spawn_h5ad_task(app.clone(), move |app| {
         let Some(file) = app
             .dialog()
             .file()
             .add_filter("H5AD", &["h5ad"])
             .blocking_pick_file()
         else {
-            state.worker().finish("cancelled", None);
+            worker.finish("cancelled", None);
             return;
         };
         match file.into_path() {
-            Ok(path) => state
-                .worker()
-                .run(&h5ad::python_path(), h5ad::worker_script(), &path),
-            Err(_) => state.worker().finish("failed", Some("invalid_h5ad")),
+            Ok(path) => worker.run(&h5ad::python_path(), h5ad::worker_script(), &path),
+            Err(_) => worker.finish("failed", Some("invalid_h5ad")),
         }
     });
     Ok(())
@@ -1015,11 +1005,11 @@ async fn analyze_h5ad(
     }
     let state = app.state::<AppState>();
     let _gate = state.project_gate.try_read().map_err(|_| "project_busy")?;
-    let path = state.worker().analysis_source(&sha256)?;
-    state.worker().reserve(timeout_seconds)?;
-    let app = app.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        app.state::<AppState>().worker().run_analysis(
+    let worker = state.worker()?;
+    let path = worker.analysis_source(&sha256)?;
+    worker.reserve(timeout_seconds)?;
+    spawn_h5ad_task(app.clone(), move |_| {
+        worker.run_analysis(
             &h5ad::python_path(),
             h5ad::worker_script(),
             &path,
@@ -1041,11 +1031,10 @@ async fn export_h5ad_selection(
     }
     let state = app.state::<AppState>();
     let _gate = state.project_gate.try_read().map_err(|_| "project_busy")?;
-    let source = state.worker().export_source(&selection_id)?;
-    state.worker().reserve(timeout_seconds)?;
-    let app = app.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<AppState>();
+    let worker = state.worker()?;
+    let source = worker.export_source(&selection_id)?;
+    worker.reserve(timeout_seconds)?;
+    spawn_h5ad_task(app.clone(), move |app| {
         let (extension, name) = if kind == "export_h5ad" {
             ("h5ad", "causalmed-retained.h5ad")
         } else {
@@ -1058,38 +1047,39 @@ async fn export_h5ad_selection(
             .set_file_name(name)
             .blocking_save_file()
         else {
-            state.worker().finish("cancelled", None);
+            worker.finish("cancelled", None);
             return;
         };
         match file.into_path() {
-            Ok(path) => state.worker().run_export(
+            Ok(path) => worker.run_export(
                 &h5ad::python_path(),
                 h5ad::worker_script(),
                 source,
                 &path,
                 &kind,
             ),
-            Err(_) => state.worker().finish("failed", Some("invalid_export")),
+            Err(_) => worker.finish("failed", Some("invalid_export")),
         }
     });
     Ok(())
 }
 #[tauri::command]
-fn get_qc_history(state: State<AppState>) -> Vec<serde_json::Value> {
-    state.worker().history()
+fn get_qc_history(state: State<AppState>) -> Result<Vec<serde_json::Value>, String> {
+    Ok(state.worker()?.history())
 }
 #[tauri::command]
 fn select_qc_history(
+    app: tauri::AppHandle,
     state: State<AppState>,
     id: String,
     project_key: String,
 ) -> Result<(), String> {
     let _gate = state.project_gate.try_read().map_err(|_| "project_busy")?;
-    let worker = state.worker();
-    if worker.snapshot().project_key != project_key {
-        return Err("project_changed".into());
-    }
-    worker.select_history(&id)
+    let worker = state.worker()?;
+    worker.require_project(&project_key)?;
+    worker.select_history(&id)?;
+    notify_h5ad(&app);
+    Ok(())
 }
 #[tauri::command]
 async fn compare_qc_history(
@@ -1100,45 +1090,49 @@ async fn compare_qc_history(
 ) -> Result<(), String> {
     let state = app.state::<AppState>();
     let _gate = state.project_gate.try_read().map_err(|_| "project_busy")?;
-    let worker = state.worker();
-    if worker.snapshot().project_key != project_key {
-        return Err("project_changed".into());
-    }
+    let worker = state.worker()?;
+    worker.require_project(&project_key)?;
     let a = worker.export_source(&left)?;
-    let b = state.worker().export_source(&right)?;
-    state.worker().reserve(120)?;
-    let app = app.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        app.state::<AppState>().worker().compare_history(
-            &h5ad::python_path(),
-            h5ad::worker_script(),
-            a,
-            b,
-        )
+    let b = worker.export_source(&right)?;
+    worker.reserve(120)?;
+    spawn_h5ad_task(app.clone(), move |_| {
+        worker.compare_history(&h5ad::python_path(), h5ad::worker_script(), a, b)
     });
     Ok(())
 }
 #[tauri::command]
 fn set_worker_limits(
+    app: tauri::AppHandle,
     state: State<AppState>,
     project_key: String,
     limits: resources::Limits,
     expected_revision: u64,
 ) -> Result<(), String> {
     let _gate = state.project_gate.try_read().map_err(|_| "project_busy")?;
-    let worker = state.worker();
-    if worker.snapshot().project_key != project_key {
-        return Err("project_changed".into());
-    }
-    worker.set_limits(limits, expected_revision)
+    let worker = state.worker()?;
+    worker.require_project(&project_key)?;
+    worker.set_limits(limits, expected_revision)?;
+    notify_h5ad(&app);
+    Ok(())
 }
 #[tauri::command]
-fn get_h5ad_state(state: State<AppState>) -> h5ad::Snapshot {
-    state.worker().snapshot()
+fn get_h5ad_state(state: State<AppState>) -> Result<h5ad::Snapshot, String> {
+    Ok(state.worker()?.snapshot())
 }
 #[tauri::command]
-fn cancel_h5ad(state: State<AppState>) {
-    state.worker().cancel();
+fn get_h5ad_progress(
+    state: State<AppState>,
+    project_key: String,
+    id: u64,
+) -> Result<Option<h5ad::Progress>, String> {
+    Ok(state.worker()?.progress(&project_key, id))
+}
+
+#[tauri::command]
+fn cancel_h5ad(app: tauri::AppHandle, state: State<AppState>) -> Result<(), String> {
+    state.worker()?.cancel();
+    notify_h5ad(&app);
+    Ok(())
 }
 
 pub fn run() {
@@ -1200,6 +1194,7 @@ pub fn run() {
             import_h5ad,
             set_worker_limits,
             get_h5ad_state,
+            get_h5ad_progress,
             get_qc_history,
             select_qc_history,
             compare_qc_history,
@@ -1249,7 +1244,14 @@ pub fn run() {
                 event,
                 tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
             ) {
-                app.state::<AppState>().worker().shutdown();
+                let state = app.state::<AppState>();
+                // Even if the handle lock was poisoned, reap its child at exit.
+                let worker = state
+                    .h5ad
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
+                worker.shutdown();
             }
         });
 }

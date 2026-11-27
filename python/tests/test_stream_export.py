@@ -36,7 +36,7 @@ class StreamExportTests(unittest.TestCase):
                 source.copy(table, dest, name='reference')
                 copier = H5adStreamCopy()
                 with patch.object(h5py.File, 'copy', side_effect=AssertionError('whole object copy')), patch(
-                    'causalmed_worker.backed.VLEN_BYTE_LIMIT', 20
+                    'causalmed_worker.vlen_io.VLEN_BYTE_LIMIT', 20
                 ):
                     copier.copy_object(table, dest, 'output')
                 actual, expected = dest['output'][:], dest['reference'][:]
@@ -49,7 +49,7 @@ class StreamExportTests(unittest.TestCase):
 
     def test_mixed_nested_reference_and_vlen_are_copied_in_tiles(self):
         import h5py
-        from causalmed_worker.backed import _vlen_hdf5
+        from causalmed_worker.vlen_io import _vlen_hdf5
         from causalmed_worker.stream_export import H5adStreamCopy
 
         with tempfile.TemporaryDirectory() as directory:
@@ -70,7 +70,7 @@ class StreamExportTests(unittest.TestCase):
                 table = source.create_dataset('table', data=data)
                 source.copy(table, dest, name='expected')
                 with patch.object(h5py.File, 'copy', side_effect=AssertionError('whole object copy')), patch(
-                    'causalmed_worker.backed.VLEN_BYTE_LIMIT', 33
+                    'causalmed_worker.vlen_io.VLEN_BYTE_LIMIT', 33
                 ):
                     H5adStreamCopy().copy_object(table, dest, 'output')
                 actual, expected = dest['output'][:], dest['expected'][:]
@@ -110,7 +110,7 @@ class StreamExportTests(unittest.TestCase):
                 packed = source_type.copy()
                 packed.pack()
                 self.assertLess(packed.get_size(), source_type.get_size())
-                with patch('causalmed_worker.backed.scratch_vector', wraps=scratch_vector) as staging:
+                with patch('causalmed_worker.vlen_io.scratch_vector', wraps=scratch_vector) as staging:
                     H5adStreamCopy.copy_object_attrs(source, dest)
                 staging.assert_called_once_with(len(data) * packed.get_size(), 'uint8', memory_limit=1024 * 1024)
                 self.assertEqual(dest.attrs.get_id('padded').get_type(), source_type)
@@ -145,7 +145,7 @@ class StreamExportTests(unittest.TestCase):
                     return original_read(attrs, name)
 
                 with patch.object(AttributeManager, '__getitem__', read_attribute), patch(
-                    'causalmed_worker.backed.VLEN_BYTE_LIMIT', 190
+                    'causalmed_worker.vlen_io.VLEN_BYTE_LIMIT', 190
                 ):
                     H5adStreamCopy().copy_object(table, dest, 'output')
                 for actual, expected in [(dest['output'][:], dest['reference'][:]),
@@ -157,7 +157,7 @@ class StreamExportTests(unittest.TestCase):
                     for index in np.ndindex(actual['items'].shape):
                         np.testing.assert_array_equal(actual['items']['sequence'][index],
                                                       expected['items']['sequence'][index])
-                with patch('causalmed_worker.backed.VLEN_BYTE_LIMIT', 60):
+                with patch('causalmed_worker.vlen_io.VLEN_BYTE_LIMIT', 60):
                     with self.assertRaisesRegex(ValueError, 'vlen_budget_exceeded'):
                         H5adStreamCopy().copy_object(table, dest, 'too_large')
 
@@ -190,7 +190,7 @@ class StreamExportTests(unittest.TestCase):
                     return original_read(attrs, name)
 
                 with patch.object(AttributeManager, '__getitem__', read_attribute), patch(
-                    'causalmed_worker.backed.VLEN_BYTE_LIMIT', 45
+                    'causalmed_worker.vlen_io.VLEN_BYTE_LIMIT', 45
                 ):
                     H5adStreamCopy().copy_object(table, dest, 'output')
                 for index in np.ndindex(records.shape):
@@ -204,7 +204,7 @@ class StreamExportTests(unittest.TestCase):
                 self.assertEqual(dest['output'].attrs.get_id('large').dtype,
                                  dest['reference'].attrs.get_id('large').dtype)
                 np.testing.assert_array_equal(dest['output'].attrs['large'], dest['reference'].attrs['large'])
-                with patch('causalmed_worker.backed.VLEN_BYTE_LIMIT', 39):
+                with patch('causalmed_worker.vlen_io.VLEN_BYTE_LIMIT', 39):
                     with self.assertRaisesRegex(ValueError, 'vlen_budget_exceeded'):
                         H5adStreamCopy().copy_object(table, dest, 'too_large')
 
@@ -223,7 +223,7 @@ class StreamExportTests(unittest.TestCase):
                 table = source.create_dataset('table', data=data)
                 table.attrs['schema'] = 'test'
                 table.attrs['pointer'] = table.ref
-                with patch('causalmed_worker.backed.VLEN_BYTE_LIMIT', 45):
+                with patch('causalmed_worker.vlen_io.VLEN_BYTE_LIMIT', 45):
                     H5adStreamCopy().copy_object(table, dest, 'table')
                 for index in np.ndindex(data.shape):
                     expected, actual = table[index], dest['table'][index]
@@ -232,7 +232,7 @@ class StreamExportTests(unittest.TestCase):
                     np.testing.assert_array_equal(actual['values'], expected['values'])
                 self.assertEqual(dest['table'].attrs['schema'], 'test')
                 self.assertFalse(dest['table'].attrs['pointer'])
-                with patch('causalmed_worker.backed.VLEN_BYTE_LIMIT', 34):
+                with patch('causalmed_worker.vlen_io.VLEN_BYTE_LIMIT', 34):
                     with self.assertRaisesRegex(ValueError, 'vlen_budget_exceeded'):
                         H5adStreamCopy().copy_object(table, dest, 'too_large')
                 for name, dtype, ref in [('object', h5py.ref_dtype, table.ref),
@@ -259,7 +259,7 @@ class StreamExportTests(unittest.TestCase):
                 for index in np.ndindex(ragged.shape):
                     ragged[index] = np.arange(12, dtype=np.int32) + sum(index)
                 copier = H5adStreamCopy(block_bytes=1024)
-                with patch('causalmed_worker.backed.VLEN_BYTE_LIMIT', 55):
+                with patch('causalmed_worker.vlen_io.VLEN_BYTE_LIMIT', 55):
                     copier.copy_object(group, handle, 'output')
                 output = handle['output']
                 self.assertEqual(output.attrs['description'], 'metadata')
@@ -269,7 +269,7 @@ class StreamExportTests(unittest.TestCase):
                 self.assertLessEqual(copier.max_read_bytes, 1024)
                 for index in np.ndindex(ragged.shape):
                     np.testing.assert_array_equal(output['ragged'][index], ragged[index])
-                with patch('causalmed_worker.backed.VLEN_BYTE_LIMIT', 47):
+                with patch('causalmed_worker.vlen_io.VLEN_BYTE_LIMIT', 47):
                     with self.assertRaisesRegex(ValueError, 'vlen_budget_exceeded'):
                         copier.copy_object(ragged, handle, 'too_large')
 
@@ -283,7 +283,7 @@ class StreamExportTests(unittest.TestCase):
                 for shape, columns in [((3, 301), np.arange(1, 301, 2)), ((3, 3, 91), None)]:
                     data = np.asarray([f'細胞-{i:04}' for i in range(np.prod(shape))], dtype=object).reshape(shape)
                     source = handle.create_dataset('source', data=data, dtype=h5py.string_dtype())
-                    with patch('causalmed_worker.backed.VLEN_BYTE_LIMIT', 100):
+                    with patch('causalmed_worker.vlen_io.VLEN_BYTE_LIMIT', 100):
                         H5adStreamCopy().copy(source, handle, 'output', rows, columns)
                     expected = data[rows] if columns is None else data[rows][:, columns]
                     np.testing.assert_array_equal(handle['output'].asstr()[:], expected)

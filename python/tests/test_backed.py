@@ -127,7 +127,7 @@ class BackedTests(unittest.TestCase):
                     self.assertLessEqual(handle.id.get_mdc_config().max_size, 1024 * 1024)
                     return read_labels(selection)
 
-                with patch('causalmed_worker.backed.ANNOTATION_SUMMARY_BYTES', 1024), patch.object(
+                with patch('causalmed_worker.vlen_io.ANNOTATION_SUMMARY_BYTES', 1024), patch.object(
                         dictionary, '_validation_values', side_effect=read_with_cache_check):
                     dictionary.validate()
                     self.assertEqual(handle.id.get_mdc_config().max_size, original.max_size)
@@ -164,7 +164,7 @@ class BackedTests(unittest.TestCase):
                     dtype=h5py.string_dtype(),
                 )
                 dictionary = CategoryDictionary(labels)
-                with patch('causalmed_worker.backed.ANNOTATION_SUMMARY_BYTES', 1024), patch.object(
+                with patch('causalmed_worker.vlen_io.ANNOTATION_SUMMARY_BYTES', 1024), patch.object(
                         dictionary, '_validation_values', wraps=dictionary._validation_values) as read:
                     dictionary.validate()
                 slices = [(call.args[0].start, call.args[0].stop) for call in read.call_args_list]
@@ -519,7 +519,7 @@ class BackedTests(unittest.TestCase):
         import json
         import subprocess
         import sys
-        modules = ['backed','qc','stream_export','selection','outcome','h5ad']
+        modules = ['scratch', 'vlen_io', 'backed', 'qc', 'stream_export', 'selection', 'outcome', 'h5ad']
         source = '\n'.join((Path(__file__).parents[1] / 'causalmed_worker' / (name+'.py')).read_text() for name in modules)
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'synthetic.h5ad'

@@ -1,6 +1,13 @@
 //! Per-project worker budgets and live resident-memory and CPU telemetry.
 use serde::{Deserialize, Serialize};
-use std::{io::Write, path::Path, process::Command};
+use std::{
+    io::Write,
+    path::Path,
+    process::{Child, Command},
+};
+
+#[cfg(windows)]
+mod windows;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -85,7 +92,10 @@ pub struct Usage {
 impl Usage {
     pub fn observe(&mut self, sample: Sample) {
         self.resident_bytes = sample.resident_bytes;
-        self.peak_resident_bytes = self.peak_resident_bytes.max(sample.resident_bytes);
+        self.peak_resident_bytes = self
+            .peak_resident_bytes
+            .max(sample.peak_resident_bytes)
+            .max(sample.resident_bytes);
         self.cpu_millis = self.cpu_millis.max(sample.cpu_millis);
         self.samples += 1;
     }
@@ -101,10 +111,17 @@ impl Usage {
 }
 pub struct Sample {
     pub resident_bytes: u64,
+    pub peak_resident_bytes: u64,
     pub cpu_millis: u64,
 }
 pub fn supported() -> bool {
-    cfg!(any(target_os = "macos", target_os = "linux"))
+    cfg!(any(target_os = "macos", target_os = "linux", windows))
+}
+pub fn sample_child(child: &Child) -> Result<Sample, ()> {
+    #[cfg(windows)]
+    return windows::sample_child(child);
+    #[cfg(not(windows))]
+    sample(child.id())
 }
 #[cfg(target_os = "macos")]
 pub fn sample(pid: u32) -> Result<Sample, ()> {
@@ -126,6 +143,7 @@ pub fn sample(pid: u32) -> Result<Sample, ()> {
     let millis = ticks * timebase.numer as u128 / timebase.denom as u128 / 1_000_000;
     Ok(Sample {
         resident_bytes: info.ri_resident_size,
+        peak_resident_bytes: info.ri_resident_size,
         cpu_millis: millis.min(u64::MAX as u128) as u64,
     })
 }
@@ -158,10 +176,11 @@ pub fn sample(pid: u32) -> Result<Sample, ()> {
     }
     Ok(Sample {
         resident_bytes: rss.saturating_mul(1024),
+        peak_resident_bytes: rss.saturating_mul(1024),
         cpu_millis: ticks.saturating_mul(1000) / hz as u64,
     })
 }
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 pub fn sample(_: u32) -> Result<Sample, ()> {
     Err(())
 }
@@ -171,10 +190,13 @@ pub fn configure(command: &mut Command, limits: &Limits) -> Result<(), String> {
     if !supported() {
         return Err("resource_monitor_unsupported".into());
     }
+    #[cfg(unix)]
     command.env(
         "CAUSALMED_WORKER_MEMORY_BYTES",
         (limits.memory_mib * 1024 * 1024).to_string(),
     );
+    #[cfg(windows)]
+    command.env_remove("CAUSALMED_WORKER_MEMORY_BYTES");
     for key in [
         "OMP_NUM_THREADS",
         "OPENBLAS_NUM_THREADS",
@@ -231,11 +253,15 @@ mod tests {
         if !supported() {
             return;
         }
+        #[cfg(windows)]
+        let s = windows::sample_current_process().unwrap();
+        #[cfg(not(windows))]
         let s = sample(std::process::id()).unwrap();
         assert!(s.resident_bytes > 0);
         let mut usage = Usage::default();
         usage.observe(Sample {
-            resident_bytes: 129 * 1024 * 1024,
+            resident_bytes: 128 * 1024 * 1024,
+            peak_resident_bytes: 129 * 1024 * 1024,
             cpu_millis: 0,
         });
         let l = Limits {

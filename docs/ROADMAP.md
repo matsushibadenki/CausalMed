@@ -11,6 +11,9 @@ Status notation:
 
 ## Research workspace foundation
 
+- 🟢 [Done] Project commands check worker ownership and availability directly in Rust without copying QC reports or probing the runtime for these checks.
+- 🟢 [Done] A WebView retries a failed worker-state read after one second, then resumes event-driven idle updates after recovery.
+
 - 🟢 [Done] Tauri 2 + Rust ownership of Document, WorkspaceState, persistence, Renderer, and worker state. WebViews display projections.
 - 🟢 [Done] Transactional SQLite persistence, revision synchronization, and restart restoration.
 - 🟢 [Done] Searchable evidence ledger, distinct observation/intervention/hypothesis records, source excerpts, context, and explicit contradictions.
@@ -55,6 +58,8 @@ Status notation:
 - 🟢 [Done] Mixed-source cohort definitions, exact condition AND perturbation AND parent-QC selection, streamed H5AD export with original/common donor IDs and review flags, SHA-bound project-local output receipts, explicit derived-source adoption and portable lineage validation. Real Kang control/stimulus cohorts, project isolation, restore/relink/re-export and eligibility rechecks verified. See [mixed-cohort validation](MIXED_COHORT_VALIDATION.md).
 - 🟢 [Done] Scalar count outcome normalization, exact feature-ID alignment, donor charts and guarded real-H5AD M0 execution with saved/reselected input snapshots, stale-review rejection, restore/relink and project isolation. See [real-outcome validation](REAL_OUTCOME_VALIDATION.md).
 - 🟢 [Done] Multi-value exact annotation filters: explicit selection, search/select-all/clear, original-source counts, OR within roles and AND with parent QC, immutable canonical lists, legacy digest preservation, donor lineage and conservative mixed adoption. Public Kang 12,859-cell export, restore/relink/re-export and project isolation verified. See [multi-value validation](MULTI_VALUE_COHORT_VALIDATION.md).
+- 🟢 [Done] Add an aggregate-QC research CLI for Gemini, OpenAI and loopback model servers, and a read-only stdio MCP connection for Codex and the standalone Google Antigravity App. [Setup](RESEARCH_CONNECTIONS.md).
+- 🟢 [Done] Reuse desktop QC history exports in the research CLI and MCP through manifest-only snapshot generation, with analysis ID and archive manifest digest.
 - 🟠 [Next] Verified dataset adapters and independently reviewed comparable study pairs; multi-gene outcomes and uncertainty estimates. Broader cohort exploration follows the multi-value workflow.
 - 🟢 [Done] Save per-cell retained/excluded decisions, overlapping rule flags, metrics, donor IDs and source-row identities with checksummed QC manifests.
 - 🟢 [Done] Export complete QC results as ZIP and retained rows as a new H5AD, including conditions and donor mapping. Preserve original data, reject existing destinations, and publish only after successful worker verification.
@@ -120,10 +125,21 @@ Status notation:
 - 🟢 [Done] Pack padded compound attribute staging records and tile datasets whose nested fields mix reference tokens and variable-length payloads. Preserve attribute datatypes and existing HDF5 reference tokens. [Validation](HDF5_MIXED_NATIVE_COPY_VALIDATION.md).
 - 🟢 [Done] Apply per-worker kernel address-space limits to whole-value VLEN attributes and compatibility copies. Check the OS-reported peak RSS before publishing and retain committed work on failure. [Validation](WORKER_MEMORY_LIMIT_VALIDATION.md).
 - 🟢 [Done] Verify Linux ARM64 worker address-space limits with public H5AD data, including native and compatibility allocation failures, preservation of committed artifacts, and exact QC and export parity after portable restore. Both 10,000-history regressions completed on macOS. [Validation](WORKER_MEMORY_LIMIT_VALIDATION.md).
-- ⭕️ [Pending] Validate Windows process accounting and portable worker distribution on additional targets.
+- ⭕️ [Pending] Validate Windows accounting and budget enforcement with real H5AD on a Windows host. Portable worker packaging for additional targets remains pending.
 - 🔴 [Later] Connect validated dataset/donor/perturbation mappings to multivariate M0/M1 evaluation with confidence intervals, calibration, and abstention rules.
 - 🟢 [Done] Reproducible bundled macOS worker: fixed Python/wheel hashes, offline verified cache, app resource selection without `.venv`/system fallback, runtime indicator, and relocated/isolated public-H5AD checks. See [bundled worker validation](BUNDLED_WORKER_VALIDATION.md).
-- 🟠 [Next] Additional runtime targets; validate Linux monitoring and implement Windows process accounting.
+- 🟢 [Done] Separate worker process setup and bounded NDJSON pipe reading from Rust supervision. Move H5AD, project and browsing tests into their corresponding module directories. Separate Python native VLEN I/O and temporary vectors from annotation projection, with the same module order in the isolated embedded worker.
+- 🟢 [Done] Use a bounded progress-only IPC response for active H5AD jobs, scoped by project and job ID. Read the full snapshot on invalidation or when the job no longer matches.
+- 🟢 [Done] Refresh H5AD state on Tauri invalidation events for job lifecycle, project changes, history selection and trash, and worker settings. Keep 150 ms progress polling while active and fall back to idle polling if event registration fails.
+- 🟢 [Done] Report an unavailable worker handle as a Tauri command error and keep reserved background jobs attached to their original Worker. Handle renderer lock failure when switching projects.
+- 🟢 [Done] Centralize scoped error translation for worker resources, donor alignment, cohort definitions and evaluation. Preserve context-specific wording and keep raw failure details out of messages.
+- 🟢 [Done] Define GitHub Actions checks for frontend builds and tests, Rust core and Tauri, and the locked Python worker on Apple silicon macOS. [Workflow](../.github/workflows/checks.yml).
+- 🟢 [Done] Implement Windows child-process working-set, peak and CPU accounting with Win32. Apply the supervisor's sampled budgets and recheck accounting at process exit before publishing results.
+- 🟢 [Done] Add a Windows Server 2025 CI job for Win32 accounting and supervised CPU/memory stop and retry. [Workflow](../.github/workflows/checks.yml).
+- 🟢 [Done] Add a manual Windows CI option for checksum-pinned public Kang 2018 QC, resource stops, restart and historical export. Resolve native VLEN symbols from the HDF5 DLL already loaded by the installed h5py wheel on Windows.
+- ⭕️ [Pending] Confirm the first hosted Windows CI and opt-in H5AD run.
+- 🟢 [Done] Discover the standard Windows development virtual environment from Tauri and use it for the opt-in Windows H5AD workflow.
+- 🟠 [Next] Additional runtime packages and distribution validation.
 - 🟢 [Done] Use independent Tauri WebviewWindows for the main workspace, floating inspector and native wgpu preview. The Rust workspace remains the shared source of state.
 - 🔴 [Later] Full GPU graph layout, labels, pan/zoom, picking, and docking integration. Add Rust/wgpu cell-embedding views linked to annotation/QC selection.
 - 🔴 [Later] Future package schema migrations and optional inclusion of original source datasets.

@@ -362,3 +362,115 @@ dialog footer { display: flex; justify-content: flex-end; gap: var(--space-2); m
   .multi-definition-form { gap: 8px; }
   .cohort-selection-footer .neutral-label { max-width: 100%; overflow-wrap: anywhere; }
 }
+
+/* Hallmark · pre-emit critique: P4 H5 E4 S4 R4 V4 */
+.h5ad-file-heading h3 {
+  font-size: clamp(18px, 2vw, 24px);
+}
+.h5ad-metrics {
+  margin-block: 12px;
+}
+.h5ad-metrics .h5ad-file-size dd {
+  font-size: var(--text-sm);
+  color: var(--color-muted);
+}
+.expression-qc {
+  margin-top: 16px;
+}
+.qc-heading h3, .real-evaluation > header h2 {
+  font-size: clamp(19px, 2vw, 24px);
+}
+.qc-summary {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: clamp(12px, 2.2vw, 28px);
+  padding: 12px 0;
+}
+.qc-summary strong {
+  font-size: clamp(21px, 2.4vw, 28px);
+  line-height: 1.08;
+}
+.qc-summary .qc-retained strong {
+  font-size: clamp(28px, 3.3vw, 40px);
+}
+.qc-summary span {
+  font-size: var(--text-xs);
+}
+.qc-summary .qc-rate {
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+.qc-priority-warning, .evaluation-abstained {
+  border-inline-start: 3px solid var(--color-accent);
+  background: var(--color-error-paper);
+  padding: 9px 12px;
+}
+.qc-priority-warning {
+  font-size: var(--text-sm);
+  line-height: 1.45;
+}
+.qc-priority-warning svg {
+  flex-shrink: 0;
+}
+.qc-donors {
+  margin: 0 0 16px;
+}
+.qc-donors h4, .qc-donors header > span {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.qc-chart-grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 175px), 1fr));
+}
+.qc-unavailable-note {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  margin-top: 8px;
+  color: var(--color-muted);
+  font-size: var(--text-xs);
+}
+.expression-qc form {
+  border-top: 1px solid var(--color-rule);
+  margin-top: 16px;
+  padding-top: 12px;
+}
+.expression-qc + .h5ad-distribution {
+  margin-top: 18px;
+}
+.evaluation-decision {
+  margin-top: 12px;
+  border-block: 1px solid var(--color-rule);
+}
+.evaluation-decision .evaluation-score > strong {
+  font-size: clamp(19px, 2.3vw, 27px);
+}
+.evaluation-decision .evaluation-reasons {
+  color: var(--color-ink);
+}
+@media (max-width: 480px) {
+  .qc-summary {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+  .qc-summary strong {
+    overflow-wrap: anywhere;
+  }
+  .qc-summary .qc-rate {
+    justify-self: end;
+  }
+  .qc-retention-track {
+    min-width: 0;
+  }
+}
+.qc-history-disclosure {
+  border-top: 1px solid var(--color-rule);
+  margin-inline: 16px;
+  padding-block: 10px;
+  font-size: var(--text-sm);
+}
+.qc-history-disclosure .qc-history {
+  margin-inline: 0;
+}

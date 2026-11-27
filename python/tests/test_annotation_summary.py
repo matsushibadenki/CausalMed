@@ -81,7 +81,7 @@ class AnnotationSummaryTests(unittest.TestCase):
                     path, convert_strings_to_categoricals=False)
             data = open_research_h5ad(path)
             try:
-                with patch('causalmed_worker.backed.ANNOTATION_SUMMARY_BYTES', 128):
+                with patch('causalmed_worker.vlen_io.ANNOTATION_SUMMARY_BYTES', 128):
                     for key in frame:
                         self.assertEqual(annotation_group(data.obs, key), reference(frame[key]))
             finally:

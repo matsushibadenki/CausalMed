@@ -10,16 +10,6 @@ use std::{
     path::Path,
     time::{Duration, Instant},
 };
-fn scope(worker: &Worker, key: &str) -> Result<(), String> {
-    let state = worker.snapshot();
-    if state.project_key != key {
-        return Err("project_changed".into());
-    }
-    if ["selecting", "running", "cancelling"].contains(&state.status.as_str()) {
-        return Err("worker_busy".into());
-    }
-    Ok(())
-}
 pub fn capture(
     store: &mut ResearchStore,
     worker: &Worker,
@@ -27,7 +17,7 @@ pub fn capture(
     sha: &str,
     revision: u64,
 ) -> Result<Document, String> {
-    scope(worker, key)?;
+    worker.require_idle(Some(key))?;
     let current = worker.snapshot().report.ok_or("dataset_missing")?;
     if current["sha256"] != sha {
         return Err("dataset_changed".into());
@@ -181,7 +171,7 @@ fn hash_matches(path: &Path, expected: &str, deadline: Instant) -> bool {
         && format!("{:x}", hash.finalize()) == expected
 }
 pub fn assess(doc: &Document, worker: &Worker, key: &str) -> Result<Eligibility, String> {
-    scope(worker, key)?;
+    worker.require_idle(Some(key))?;
     let mut availability = BTreeMap::new();
     let deadline = Instant::now() + Duration::from_secs(15);
     for c in &doc.cohorts {

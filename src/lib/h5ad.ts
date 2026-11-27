@@ -1,4 +1,5 @@
 import { invoke, isTauri } from '@tauri-apps/api/core';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { useSyncExternalStore } from 'react';
 export type QcOptions = { matrix:string; geneColumn:string; mitoPrefix:string; donorColumn:string; minGenes:number; maxGenes:number|null; minCounts:number; maxCounts:number|null; maxMitoPct:number|null };
 export type Histogram = { counts:number[];edges:number[];log:boolean;median:number;min:number;max:number;lower:number|null;upper:number|null };
@@ -25,27 +26,83 @@ let snapshot = initial;
 const subscribers = new Set<() => void>();
 let timer: ReturnType<typeof setTimeout> | undefined;
 let request: Promise<void> | undefined;
+let subscriptionVersion = 0;
+let unlisten: UnlistenFn | undefined;
+let eventSubscriptionReady = false;
 export const workerActive = (status: string) => ['selecting', 'running', 'cancelling'].includes(status);
-export function refreshH5ad(force=false): Promise<void> {
+type H5adProgress = Pick<H5adState, 'status' | 'percent' | 'phase' | 'elapsedMs' | 'operation' | 'resources'>;
+
+export function refreshH5ad(force = false): Promise<void> {
+  return fetchH5ad(false, force);
+}
+
+function fetchH5ad(progressOnly: boolean, force = false): Promise<void> {
   if (!isTauri()) return Promise.resolve();
-  if (request) return force ? request.then(()=>refreshH5ad()) : request;
-  request = invoke<H5adState>('get_h5ad_state').then(value => {
-    snapshot = value; subscribers.forEach(fn => fn());
-  }).finally(() => { request = undefined; });
+  if (request) return force ? request.then(() => refreshH5ad(), () => refreshH5ad()) : request;
+
+  let received = false;
+  request = (async () => {
+    if (progressOnly && workerActive(snapshot.status)) {
+      const { projectKey, id } = snapshot;
+      const progress = await invoke<H5adProgress | null>('get_h5ad_progress', { projectKey, id });
+      snapshot = progress ? { ...snapshot, ...progress } : await invoke<H5adState>('get_h5ad_state');
+    } else {
+      snapshot = await invoke<H5adState>('get_h5ad_state');
+    }
+    received = true;
+    subscribers.forEach(fn => fn());
+  })().finally(() => {
+    request = undefined;
+    schedulePoll(!received);
+  });
   return request;
 }
-let pollVersion = 0;
-function poll(version: number) {
-  void refreshH5ad().catch(() => {}).finally(() => {
-    if (subscribers.size && version === pollVersion) timer = setTimeout(() => poll(version), workerActive(snapshot.status) ? 150 : 1000);
-  });
+function schedulePoll(retryFullSnapshot: boolean) {
+  clearTimeout(timer);
+  if (!subscribers.size) return;
+  const active = workerActive(snapshot.status);
+  if (retryFullSnapshot || active || !eventSubscriptionReady) {
+    timer = setTimeout(
+      () => void fetchH5ad(!retryFullSnapshot).catch(() => {}),
+      active && !retryFullSnapshot ? 150 : 1000,
+    );
+  }
 }
+
+function invalidate() {
+  void refreshH5ad(true).catch(() => {});
+}
+
 function subscribe(fn: () => void) {
   subscribers.add(fn);
-  if (subscribers.size === 1) poll(++pollVersion);
+  if (subscribers.size === 1 && isTauri()) {
+    const version = ++subscriptionVersion;
+    // Register first so a change during startup cannot be missed.
+    void listen('h5ad-state-changed', () => {
+      if (version === subscriptionVersion) invalidate();
+    }).then(stop => {
+      if (version !== subscriptionVersion) {
+        stop();
+        return;
+      }
+      unlisten = stop;
+      eventSubscriptionReady = true;
+      invalidate();
+    }).catch(() => {
+      if (version === subscriptionVersion) invalidate();
+    });
+    window.addEventListener('focus', invalidate);
+  }
   return () => {
     subscribers.delete(fn);
-    if (!subscribers.size) { ++pollVersion; clearTimeout(timer); }
+    if (!subscribers.size && isTauri()) {
+      ++subscriptionVersion;
+      clearTimeout(timer);
+      unlisten?.();
+      unlisten = undefined;
+      eventSubscriptionReady = false;
+      window.removeEventListener('focus', invalidate);
+    }
   };
 }
 export function useH5ad() { return useSyncExternalStore(subscribe, () => snapshot); }

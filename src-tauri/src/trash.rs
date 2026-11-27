@@ -108,13 +108,7 @@ fn remove_marker(path: &Path, id: &str, scope: &str) -> Result<(), String> {
     fs::remove_file(path).map_err(|_| "storage_error".into())
 }
 pub(crate) fn history(worker: &Worker, scope: &str, id: &str, restore: bool) -> Result<(), String> {
-    let snapshot = worker.snapshot();
-    if snapshot.project_key != scope {
-        return Err("project_changed".into());
-    }
-    if ["running", "selecting", "cancelling"].contains(&snapshot.status.as_str()) {
-        return Err("worker_busy".into());
-    }
+    worker.require_idle(Some(scope))?;
     if !crate::h5ad::safe_id(id) {
         return Err("trash_unavailable".into());
     }
@@ -193,13 +187,7 @@ pub(crate) fn batch(
     ids: &[String],
     restore: bool,
 ) -> Result<BatchResult, String> {
-    let snapshot = worker.snapshot();
-    if snapshot.project_key != scope {
-        return Err("project_changed".into());
-    }
-    if ["running", "selecting", "cancelling"].contains(&snapshot.status.as_str()) {
-        return Err("worker_busy".into());
-    }
+    worker.require_idle(Some(scope))?;
     let mut seen = std::collections::HashSet::new();
     if ids.is_empty() || ids.len() > 10_000 || ids.iter().any(|id| !seen.insert(id)) {
         return Err("invalid_batch_selection".into());
